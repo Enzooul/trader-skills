@@ -1,0 +1,3 @@
+# Files the skills write while running. Only the rules file is versioned.
+trader/*
+!trader/config.json
