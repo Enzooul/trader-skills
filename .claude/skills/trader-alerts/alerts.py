@@ -31,12 +31,21 @@ are for the plan's day only). An above / below alert rings ONCE and then stays
 quiet until you reset it, unless the rule has "rearm": true (it re-arms when
 the price crosses back). A pct_move alert rings at most once per day.
 
-Quotes (free, delayed, unofficial; for alerts only, never for timing an order):
-  yahoo   https://query2.finance.yahoo.com/v8/finance/chart/TSLA (falls back to
-          query1 on a 429 or a 5xx; one retry with a pause on a 429; one
-          request per ticker, half a second apart; the default)
-  stooq   https://stooq.com/q/l/?s=tsla.us&f=sd2t2ohlcv&h&e=csv (Stooq's free
-          CSV; it answered 404 on 2026-10-13, kept for when it is back)
+Quotes (for alerts only, never for timing an order):
+  yahoo    free, delayed ~15min, unofficial. https://query2.finance.yahoo.com/
+           v8/finance/chart/TSLA (falls back to query1 on a 429 or a 5xx; one
+           retry with a pause on a 429; one request per ticker, half a second
+           apart; the default)
+  stooq    free, delayed, unofficial CSV. https://stooq.com/q/l/?s=tsla.us&
+           f=sd2t2ohlcv&h&e=csv (it answered 404 on 2026-10-13, kept for when
+           it is back)
+  finnhub  free tier, real-time (not delayed) for US-listed stocks.
+           https://finnhub.io/api/v1/quote?symbol=TSLA&token=KEY . Needs the
+           FINNHUB_API_KEY environment variable set (never pass the key on
+           the command line or write it into a file this skill writes).
+           Sign up at finnhub.io; the free tier is rate-limited (60 calls/min)
+           so keep watchlists small when polling often. Even real-time data is
+           still not your broker's fill price.
   --offline DIR reads DIR/<source>-<TICKER>.json|csv (or .json.gz) instead.
 
 NYSE calendar: the 2026 and 2027 holidays and 1:00 p.m. early closes as
@@ -201,6 +210,17 @@ def yahoo_url(sym, host=YAHOO_HOSTS[0]):
     return "https://%s/v8/finance/chart/%s?range=1d&interval=1d" % (host, sym.upper().replace(".", "-"))
 
 
+FINNHUB_QUOTE_URL = "https://finnhub.io/api/v1/quote"
+
+
+def finnhub_url(sym):
+    key = os.environ.get("FINNHUB_API_KEY")
+    if not key:
+        raise AlertError("FINNHUB_API_KEY is not set: export it as an environment variable "
+                          "(never hardcode it or pass it on the command line)")
+    return "%s?symbol=%s&token=%s" % (FINNHUB_QUOTE_URL, sym.upper().replace(".", "-"), key)
+
+
 def parse_stooq(text, sym):
     """Symbol,Date,Time,Open,High,Low,Close,Volume -> quote. N/D means no data."""
     rows = list(csv.DictReader(io.StringIO(text.strip())))
@@ -244,6 +264,23 @@ def parse_yahoo(text, sym):
             "high": m.get("regularMarketDayHigh"), "low": m.get("regularMarketDayLow"),
             "prev_close": m.get("previousClose") or m.get("chartPreviousClose"), "time": when,
             "currency": m.get("currency"), "source": "yahoo"}
+
+
+def parse_finnhub(text, sym):
+    try:
+        d = json.loads(text)
+    except ValueError:
+        raise AlertError("Finnhub returned something unexpected for %s" % sym)
+    if not isinstance(d, dict):
+        raise AlertError("Finnhub returned something unexpected for %s" % sym)
+    price = d.get("c")
+    if not price:
+        raise AlertError("Finnhub has no price for %s (check the ticker, or that FINNHUB_API_KEY is valid)" % sym)
+    t = d.get("t")
+    when = (datetime.datetime.fromtimestamp(t, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            if t else "")
+    return {"symbol": sym.upper(), "price": float(price), "open": d.get("o"), "high": d.get("h"),
+            "low": d.get("l"), "prev_close": d.get("pc"), "time": when, "source": "finnhub"}
 
 
 _urlopen = urllib.request.urlopen   # tests swap these two
@@ -298,6 +335,10 @@ def fetch_yahoo(sym, timeout=20):
     raise AlertError("%s answered HTTP %d" % (last[0].split("?")[0], last[1]))
 
 
+def fetch_finnhub(sym, timeout=20):
+    return fetch(finnhub_url(sym), timeout)
+
+
 def _offline_text(folder, source, sym):
     ext = "csv" if source == "stooq" else "json"
     base = os.path.join(folder, "%s-%s.%s" % (source, sym, ext))
@@ -308,6 +349,10 @@ def _offline_text(folder, source, sym):
         with gzip.open(base + ".gz", "rt", encoding="utf-8") as fh:
             return fh.read()
     raise AlertError("no offline quote file %s" % base)
+
+
+_FETCH = {"stooq": lambda sym: fetch(stooq_url(sym)), "finnhub": fetch_finnhub}
+_PARSE = {"stooq": parse_stooq, "finnhub": parse_finnhub}
 
 
 def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
@@ -321,8 +366,8 @@ def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
             else:
                 if i and pause:
                     _sleep(pause)
-                text = fetch(stooq_url(sym)) if source == "stooq" else fetch_yahoo(sym)
-            quotes[sym] = parse_stooq(text, sym) if source == "stooq" else parse_yahoo(text, sym)
+                text = _FETCH.get(source, fetch_yahoo)(sym)
+            quotes[sym] = _PARSE.get(source, parse_yahoo)(text, sym)
         except AlertError as e:
             errors.append(str(e))
     return quotes, errors
@@ -344,8 +389,9 @@ def write_prices(path, quotes, now_utc, source):
         detail[s] = {"prev_close": q.get("prev_close"), "time": q.get("time"), "source": q.get("source"),
                      "fetched": stamp}
     doc = {"as_of": stamp, "source": source,
-           "note": ("Delayed quotes for alerts and sizing checks. Your broker's price is the one that fills. "
-                    "detail.fetched is when each price was read."),
+           "note": (("Real-time (Finnhub free tier) quotes" if source == "finnhub" else "Delayed quotes")
+                    + " for alerts and sizing checks. Your broker's price is the one that fills. "
+                      "detail.fetched is when each price was read."),
            "prices": prices, "detail": detail}
     _write(path, doc)
     return doc
@@ -581,7 +627,10 @@ def cmd_quote(a):
             print("error: " + e)
         if a.write and quotes:
             print("Wrote %d price(s) to %s." % (len(quotes), a.write))
-        print("Quotes are free, delayed and unofficial: for alerts only. Your broker's price is the one that fills.")
+        if a.source == "finnhub":
+            print("Finnhub free-tier quotes: real-time, but still not your broker's fill price.")
+        else:
+            print("Quotes are free, delayed and unofficial: for alerts only. Your broker's price is the one that fills.")
     return 0 if quotes else 1
 
 
@@ -720,7 +769,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     def net(p):
-        p.add_argument("--source", default="yahoo", choices=["yahoo", "stooq"])
+        p.add_argument("--source", default="yahoo", choices=["yahoo", "stooq", "finnhub"])
         p.add_argument("--offline", metavar="DIR", help="read <source>-<TICKER>.json|csv files, no network")
         p.add_argument("--now", help="pretend it is this time (no offset = New York time)")
         p.add_argument("--json", action="store_true")
