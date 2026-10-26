@@ -14,6 +14,8 @@
   "no_entries_after": "16:00",
   "flat_by": "15:55",
   "fractional": false,
+  "broker": "ibkr",
+  "paper": false,
   "blocked": [],
   "allow_options": false,
   "allow_margin": false,
