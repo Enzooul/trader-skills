@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "ask": [
+      "mcp__Interactive_Brokers_IBKR__create_order_instruction",
+      "mcp__Interactive_Brokers_IBKR__delete_order_instruction",
+      "mcp__alpaca__place_stock_order"
+    ]
+  }
+}

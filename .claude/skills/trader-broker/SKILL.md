@@ -135,6 +135,26 @@ submits orders directly to the market. So with IBKR the final yes happens in
 IBKR as well. Set `"broker": "ibkr"` in `trader/config.json`. Set its tools
 that draft orders to Needs approval too.
 
+Tool names on this connector (read from its schema on 2026-10-29):
+
+- Read only, use freely: `get_account_summary`, `get_account_balances`,
+  `get_account_positions` (what is held: use it where the Alpaca steps say
+  `get_open_position`), `get_account_orders` (open orders, the bracket legs),
+  `get_account_trades` (today's fills, for `ticket.py result` and `fill`),
+  `search_contracts`, `get_price_snapshot`, `get_price_history`.
+- Changes the account, **Needs approval**: `create_order_instruction` (where
+  the Alpaca steps say `place_stock_order`), `delete_order_instruction`
+  (where they say `cancel_order_by_id`), and the alert, watchlist and saved
+  screener tools.
+
+Before the first IBKR order in a session, load the schema of
+`create_order_instruction` and show the user the exact arguments next to
+the ticket; never guess its fields. The connector's change log lists
+"Autonomous Trading" in version 1.2.1 (2026-10-27): do not assume IBKR
+still asks for a second approval in its own app. Treat every
+`create_order_instruction` call as a real order on a real account, which
+is why the ticket, trader-risk and the user's word-for-word yes come first.
+
 ## Steps: the entry
 
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT

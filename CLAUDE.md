@@ -17,17 +17,21 @@ Este repositório é a oficina de **day trading** (ações dos EUA, só compra/l
 
 ## Fonte de dados: IBKR primeiro
 
-A conta real do usuário é na Interactive Brokers (IBKR) e os dados devem vir de lá. Os scripts Python não falam com a IBKR (o conector é uma ferramenta do Claude, não uma URL), então a ordem é:
+A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação usa dados de lá**. Os scripts Python não falam com a IBKR (o conector é uma ferramenta do Claude, não uma URL). Então o Claude lê a IBKR pelo conector e entrega os números aos scripts com `.claude/skills/trader-alerts/ibkr_chart.py`:
 
-1. **IBKR (principal).** Se as ferramentas `mcp__Interactive_Brokers_IBKR__*` estiverem na sessão, use-as para qualquer preço:
-   - `search_contracts` com o ticker para achar o `contract_id` (linha com `symbol` exato e listagem dos EUA);
-   - `get_price_snapshot` (`contract_id`, `market_data_names` como `["last","bid_ask","prior_close","volume","top_status"]`) para a cotação do momento. `top_status` diz se o dado é `REALTIME` ou `DELAYED`: informe isso ao usuário;
-   - `get_price_history` (`contract_id`, `security_type: "STK"`, `step: "FIVE_MINS"` ou `"ONE_MIN"`, `outside_rth: false`, e `period` **ou** `step_count`, nunca os dois) para barras.
-   Grave a cotação em `trader/prices.json` no formato `{"as_of": "...Z", "source": "ibkr", "prices": {"TSLA": 366.48}}` para o `trader-budget` e o `trader-risk`.
-2. **Yahoo (reserva).** Só quando o conector não estiver na sessão ou falhar. Diga ao usuário, em uma linha, que o dado veio da reserva e por quê (ex.: "IBKR respondeu 503").
-3. Nunca misture fontes sem avisar, e nunca invente um preço se as duas falharem.
+1. **Achar o contrato:** `search_contracts` com o ticker. Use a linha com `symbol` exato e `country_code` "US"; o número é `underlying_contract_id` (ex.: AAPL = 265598).
+2. **Cotação do momento** (alerts, budget, risk): `get_price_snapshot` com `market_data_names` `["last","bid_ask","prior_close","volume","top_status"]`. As chaves da resposta usam hífen (`bid-ask`, `top-status`). Grave com:
+   `python3 .claude/skills/trader-alerts/ibkr_chart.py price --symbol AAPL --price <last.price> --time <last.ts> --status <top-status.status>`
+   Isso escreve `trader/prices.json` com `"source": "ibkr"`. Diga ao usuário se veio REALTIME ou DELAYED.
+3. **Barras** (entry, exit, scanner orb, timemachine): `get_price_history` com `contract_id`, `security_type: "STK"`, `step: "FIVE_MINS"`, `outside_rth: false` e `period` (ex.: `"ONE_DAY"`; `"THREE_MONTHS"` para o timemachine) **ou** `step_count`, nunca os dois. Escreva as barras, da mais antiga para a mais nova e com o horário de INÍCIO de cada barra, em um JSON `{"symbol": "AAPL", "interval": "5m", "prev_close": 351.1, "bars": [{"t": <unix s>, "o": .., "h": .., "l": .., "c": .., "v": ..}]}` e converta:
+   `python3 .claude/skills/trader-alerts/ibkr_chart.py bars --in <arquivo> --out trader/ibkr`
+   Depois rode os scripts com `--offline trader/ibkr/<SYM>.json` (entry, exit, scanner orb) ou `--offline trader/ibkr` (timemachine). As mensagens dos scripts ainda dizem "Yahoo" no cabeçalho: o dado é da IBKR, diga isso ao usuário.
+4. **O scan amplo** (`scan.py universe` e `scan.py daily`, ~5.900 ações) continua no Yahoo, porque pedir milhares de gráficos ao conector um por um não é viável. Os candidatos finais são sempre confirmados com barras e cotação da IBKR antes de entry/exit/budget/risk.
+5. **Reserva:** só quando o conector não estiver na sessão ou falhar (já respondeu "Service Unavailable" algumas vezes). Use o Yahoo e diga, em uma linha, que o dado veio da reserva e por quê. Nunca misture fontes sem avisar e nunca invente um preço.
 
-O conector da IBKR é **só para dados** nesta oficina. Ferramentas que mexem na conta (`create_order_instruction`, `delete_order_instruction`, alertas e watchlists na conta) só com pedido explícito do usuário, e ordens sempre passam por `trader-risk` e pelo "sim" do usuário. A conta é **real** (`"paper": false` em `trader/config.json`).
+**Conta e posições** vêm da IBKR também (somente leitura): `get_account_summary`, `get_account_balances`, `get_account_positions`, `get_account_orders`, `get_account_trades`. Use-as para "quanto tenho", "o que está aberto" e "o que já operei hoje" (trader-risk e trader-broker).
+
+**Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
 

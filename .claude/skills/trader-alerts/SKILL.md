@@ -87,9 +87,13 @@ close, so "flat by close" at 15:55 rings at 12:55 on those days.
   with the exact `symbol`, US listing -> `contract_id`), then
   `get_price_snapshot` with `market_data_names`
   `["last", "bid_ask", "prior_close", "top_status"]`. Response keys use
-  hyphens (`bid-ask`, `prior-close`, `top-status`). Write it into
-  `trader/prices.json` as `{"as_of": "...Z", "source": "ibkr", "prices":
-  {"TSLA": 366.48}}` and say whether `top-status` was REALTIME or DELAYED.
+  hyphens (`bid-ask`, `prior-close`, `top-status`). Write it with
+  `python3 "${CLAUDE_SKILL_DIR}/ibkr_chart.py" price --symbol TSLA --price
+  <last.price> --time <last.ts> --status <top-status.status>`, which merges
+  it into `trader/prices.json` with `"source": "ibkr"`, and say whether it
+  was REALTIME or DELAYED. For bars, `ibkr_chart.py bars` turns
+  `get_price_history` into the chart files the other skills read with
+  `--offline` (see "Fonte de dados" in the repo's CLAUDE.md).
   Use the Yahoo/Stooq sources below only when the connector is missing or
   fails, and tell the user the price came from the fallback. With Alpaca the
   connector call is `get_stock_snapshot`.
