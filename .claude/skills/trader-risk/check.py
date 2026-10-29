@@ -63,6 +63,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -324,6 +325,44 @@ def account(cfg, portfolio, prices):
             values[t] = basis
             warnings.append("no price for %s: valued at its cost basis %s" % (t, money(basis)))
     return {"cash": cash, "shares": shares, "values": values}, warnings
+
+
+LIMITS_PCT = (("max_loss_per_trade_usd", "max_loss_per_trade_pct"),
+              ("max_daily_loss_usd", "max_daily_loss_pct"),
+              ("max_order_usd", "max_order_pct"))
+
+
+def from_account(cfg, path, today):
+    """"budget_source": "ibkr" -> the budget is the IBKR balance in trader/account.json
+    (trader-alerts/ibkr_chart.py account, from the connector), and every dollar limit
+    named in "limits_pct" is that percent of it, rounded down to the cent. The file
+    must be from today in New York: a stale balance is refused, never guessed."""
+    if str(cfg.get("budget_source") or "").lower() != "ibkr":
+        return cfg, None
+    hint = ("read the balance with the IBKR connector (get_account_summary) and run "
+            "python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> "
+            "--cash <total_cash_value>")
+    if not path or not os.path.exists(path):
+        raise RiskError("budget_source is \"ibkr\" but there is no %s: %s" % (path, hint))
+    try:
+        with open(path, encoding="utf-8") as fh:
+            acct = json.load(fh)
+        bal = float(acct["net_liquidation"])
+        as_of = datetime.datetime.strptime(str(acct["as_of"])[:19], "%Y-%m-%dT%H:%M:%S")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise RiskError("%s is not a balance from ibkr_chart.py account (%s): %s" % (path, e, hint))
+    day = to_eastern(as_of).date().isoformat()
+    if day != today:
+        raise RiskError("the IBKR balance in %s is from %s, not today (%s): %s" % (path, day, today, hint))
+    if bal <= 0:
+        raise RiskError("the IBKR balance in %s is %.2f: nothing to trade with" % (path, bal))
+    c = dict(cfg)
+    c["budget"] = round(bal, 2)
+    pct = cfg.get("limits_pct") or {}
+    for usd, key in LIMITS_PCT:
+        if pct.get(key) is not None:
+            c[usd] = math.floor(bal * float(pct[key]) + 1e-6) / 100.0
+    return c, acct
 
 
 def rec_day(rec):
@@ -772,6 +811,8 @@ def main(argv=None):
     ap.add_argument("--portfolio", default="trader/portfolio.json",
                     help="your account; if missing, a fresh account funded with the budget")
     ap.add_argument("--prices", default="trader/prices.json")
+    ap.add_argument("--account", default="trader/account.json",
+                    help="the IBKR balance and positions, used when the config says \"budget_source\": \"ibkr\"")
     ap.add_argument("--state", default="trader/state/broker.json", help="what trader-broker placed today")
     ap.add_argument("--now", help="pretend it is this New York time, e.g. \"2026-10-19 10:15\"")
     ap.add_argument("--today", help="YYYY-MM-DD (default: today in New York)")
@@ -788,7 +829,12 @@ def main(argv=None):
         if not isinstance(orders, list) or not orders:
             raise RiskError("no orders in %s" % a.orders)
         cfg = read_json(a.config, "config", required=False) or {}
-        portfolio = read_json(a.portfolio, "portfolio", required=False)
+        cfg, acct = from_account(cfg, a.account, a.today or to_eastern(now).date().isoformat())
+        if acct:
+            portfolio = {"cash": float(acct.get("cash", acct["net_liquidation"])),
+                         "positions": acct.get("positions") or []}
+        else:
+            portfolio = read_json(a.portfolio, "portfolio", required=False)
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)
