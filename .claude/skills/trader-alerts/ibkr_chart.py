@@ -17,11 +17,14 @@ so Claude reads IBKR with the connector and passes the numbers here:
 
 Usage:
     python3 ibkr_chart.py bars --in aapl_bars.json --out trader/ibkr
+    python3 ibkr_chart.py bars --in ibkr_answer.json --symbol AAPL --prev-close 351.10
     python3 ibkr_chart.py price --symbol AAPL --price 349.26 --time 1793281748 --status REALTIME
     python3 ibkr_chart.py account --net-liq 357.48 --cash 357.48 [--position AAPL=2@349.10]
 
-The bars input is a small JSON that Claude writes from get_price_history,
-one object per bar, oldest first, each bar stamped at its START:
+The bars input is either the raw get_price_history answer saved as-is
+(columns "time", "open", "high", "low", "close", "volume", ISO times at each
+bar's START, plus "chart_step" and "chart_end"; pass --symbol, since the
+answer does not name it), or a small JSON one object per bar, oldest first:
 
     {"symbol": "AAPL", "interval": "5m", "prev_close": 351.10,
      "bars": [{"t": 1793280600, "o": 349.0, "h": 349.6, "l": 348.8, "c": 349.3, "v": 120400}, ...]}
@@ -53,6 +56,32 @@ def _secs(t):
     return int(t)
 
 
+def _iso_secs(text):
+    try:
+        return int(dt.datetime.strptime(str(text).replace("Z", "+0000"), "%Y-%m-%dT%H:%M:%S%z").timestamp())
+    except ValueError:
+        raise IBKRError("time %r is not like 2026-10-29T13:55:00Z" % (text,))
+
+
+def from_ibkr(doc, symbol, prev_close=None):
+    """Raw get_price_history answer (columns) -> the bars input to_chart takes.
+    Seen 2026-10-29: {"chart_step":300,"chart_end":"...Z","time":[...],"open":[...],
+    "high","low","close","volume"}; times are each bar's start."""
+    times = doc.get("time") or []
+    cols = {k: doc.get(k) or [] for k in ("open", "high", "low", "close", "volume")}
+    if any(len(v) != len(times) for v in cols.values()):
+        raise IBKRError("the IBKR answer has columns of different lengths")
+    interval = {60: "1m", 300: "5m"}.get(int(doc.get("chart_step") or 0))
+    if not interval:
+        raise IBKRError("chart_step %s: only ONE_MIN (60) or FIVE_MINS (300) bars" % doc.get("chart_step"))
+    bars = [{"t": _iso_secs(t), "o": cols["open"][i], "h": cols["high"][i], "l": cols["low"][i],
+             "c": cols["close"][i], "v": cols["volume"][i]} for i, t in enumerate(times)]
+    out = {"symbol": symbol, "interval": interval, "bars": bars, "prev_close": prev_close}
+    if doc.get("chart_end"):
+        out["as_of"] = _iso_secs(doc["chart_end"])
+    return out
+
+
 def to_chart(doc):
     """{"symbol","interval","bars":[{t,o,h,l,c,v}],"prev_close"?} -> Yahoo v8 chart dict."""
     sym = str(doc.get("symbol") or "").upper().strip()
@@ -79,7 +108,7 @@ def to_chart(doc):
     last = rows[-1]
     meta = {"symbol": sym.replace(".", "-"), "currency": "USD", "exchangeTimezoneName": "America/New_York",
             "dataGranularity": interval, "regularMarketPrice": last[4],
-            "regularMarketTime": last[0] + step, "regularMarketVolume": sum(r[5] for r in rows),
+            "regularMarketTime": min(last[0] + step, int(doc.get("as_of") or last[0] + step)), "regularMarketVolume": sum(r[5] for r in rows),
             "source": "ibkr"}
     if doc.get("prev_close") is not None:
         meta["previousClose"] = meta["chartPreviousClose"] = float(doc["prev_close"])
@@ -103,6 +132,10 @@ def cmd_bars(a):
             doc = json.load(fh)
     except (OSError, ValueError) as e:
         raise IBKRError("could not read %s: %s" % (a.inp, e))
+    if isinstance(doc, dict) and "time" in doc and "close" in doc:
+        if not a.symbol:
+            raise IBKRError("a raw IBKR answer does not name the stock: pass --symbol")
+        doc = from_ibkr(doc, a.symbol.upper(), a.prev_close)
     chart = to_chart(doc)
     meta = chart["chart"]["result"][0]["meta"]
     sym = meta["symbol"]
@@ -178,6 +211,8 @@ def main(argv=None):
     b = sub.add_parser("bars", help="IBKR bars -> Yahoo v8 chart files for --offline")
     b.add_argument("--in", dest="inp", required=True, help="bars JSON written from get_price_history")
     b.add_argument("--out", default="trader/ibkr", help="folder for <SYM>.json and <SYM>-60d5m.json")
+    b.add_argument("--symbol", help="the ticker, needed with a raw IBKR answer")
+    b.add_argument("--prev-close", type=float, help="yesterday's close, if known")
     p = sub.add_parser("price", help="one IBKR quote -> trader/prices.json")
     p.add_argument("--symbol", required=True)
     p.add_argument("--price", required=True, type=float, help="last (or mid of bid/ask if last is empty)")
