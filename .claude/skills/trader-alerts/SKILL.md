@@ -81,9 +81,22 @@ close, so "flat by close" at 15:55 rings at 12:55 on those days.
   and for checking a size, not for timing an order. The broker's price is the
   one that fills. Each price in `trader/prices.json` keeps its quote time, and
   trader-risk only uses one under 15 minutes old.
-- If both are down, read the price from the broker connector (Alpaca
-  `get_stock_snapshot`, IBKR `get_price_snapshot`) and write it into
-  `trader/prices.json` as `{"as_of": "...Z", "prices": {"TSLA": 366.48}}`.
+- **IBKR first.** When `trader/config.json` has `"broker": "ibkr"` and the
+  Interactive Brokers connector tools are in the session, read the price from
+  the connector before running `quote`: `search_contracts` (ticker -> the row
+  with the exact `symbol`, US listing -> `contract_id`), then
+  `get_price_snapshot` with `market_data_names`
+  `["last", "bid_ask", "prior_close", "top_status"]`. Response keys use
+  hyphens (`bid-ask`, `prior-close`, `top-status`). Write it with
+  `python3 "${CLAUDE_SKILL_DIR}/ibkr_chart.py" price --symbol TSLA --price
+  <last.price> --time <last.ts> --status <top-status.status>`, which merges
+  it into `trader/prices.json` with `"source": "ibkr"`, and say whether it
+  was REALTIME or DELAYED. For bars, `ibkr_chart.py bars` turns
+  `get_price_history` into the chart files the other skills read with
+  `--offline` (see "Fonte de dados" in the repo's CLAUDE.md).
+  Use the Yahoo/Stooq sources below only when the connector is missing or
+  fails, and tell the user the price came from the fallback. With Alpaca the
+  connector call is `get_stock_snapshot`.
 
 ## The NYSE clock
 
