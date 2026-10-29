@@ -79,6 +79,15 @@ the smallest of four limits:
 | max order | `max_order_usd` / entry |
 | cash | (budget minus the cash buffer) / entry, never more than the cash in `trader/portfolio.json` |
 
+**Budget from the IBKR balance.** When `trader/config.json` says
+`"budget_source": "ibkr"`, the budget is the account balance in
+`trader/account.json` (written by `trader-alerts/ibkr_chart.py account` from
+the connector's `get_account_summary`), and `max_loss_per_trade_usd`,
+`max_daily_loss_usd` and `max_order_usd` become the percents in
+`"limits_pct"` of that balance. The file must be from today in New York;
+otherwise `size.py` refuses and asks for a fresh balance (`--account` points
+elsewhere).
+
 The entry it sizes at: the limit price with `--limit`. For a market order, the
 plan's entry, or the price in `trader/prices.json` if it is fresh (under 15
 minutes old) and higher. A price that ran up since the plan means a bigger

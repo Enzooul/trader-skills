@@ -42,6 +42,7 @@ python3 "${CLAUDE_SKILL_DIR}/check.py" --now "2026-10-19 10:15"  # pin the clock
 | `trader/orders.json` | the proposed orders (trader-budget, or trader-broker's flatten) |
 | `trader/config.json` | the limits (trader-budget ships `config.example.json`) |
 | `trader/portfolio.json` | cash and holdings; if missing, a fresh account funded with the budget |
+| `trader/account.json` | with `"budget_source": "ibkr"`: the IBKR balance, cash and positions of today (`ibkr_chart.py account`); the budget and the dollar limits in `limits_pct` come from it, and it replaces `portfolio.json` |
 | `trader/prices.json` | a fresh price raises the entry it measures risk from; also values holdings |
 | `trader/state/broker.json` | what was placed today: duplicates, trades per day, daily loss, day trades |
 | `trader/state/risk.json` | the verdicts it writes, with a fingerprint of each exact order |

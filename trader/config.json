@@ -1,5 +1,11 @@
 {
+  "budget_source": "ibkr",
   "budget": 200,
+  "limits_pct": {
+    "max_loss_per_trade_pct": 7.5,
+    "max_daily_loss_pct": 22.5,
+    "max_order_pct": 80
+  },
   "cash_buffer_pct": 10,
   "max_position_pct": 80,
   "max_order_usd": 160,

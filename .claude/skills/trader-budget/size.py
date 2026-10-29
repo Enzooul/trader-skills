@@ -167,6 +167,44 @@ def read_json(path, what):
         raise SizeError("%s is not valid JSON: %s" % (path, e))
 
 
+LIMITS_PCT = (("max_loss_per_trade_usd", "max_loss_per_trade_pct"),
+              ("max_daily_loss_usd", "max_daily_loss_pct"),
+              ("max_order_usd", "max_order_pct"))
+
+
+def from_account(cfg, path, today):
+    """"budget_source": "ibkr" -> the budget is the IBKR balance in trader/account.json
+    (trader-alerts/ibkr_chart.py account, from the connector), and every dollar limit
+    named in "limits_pct" is that percent of it, rounded down to the cent. The file
+    must be from today in New York: a stale balance is refused, never guessed."""
+    if str(cfg.get("budget_source") or "").lower() != "ibkr":
+        return cfg, None
+    hint = ("read the balance with the IBKR connector (get_account_summary) and run "
+            "python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> "
+            "--cash <total_cash_value>")
+    if not path or not os.path.exists(path):
+        raise SizeError("budget_source is \"ibkr\" but there is no %s: %s" % (path, hint))
+    try:
+        with open(path, encoding="utf-8") as fh:
+            acct = json.load(fh)
+        bal = float(acct["net_liquidation"])
+        as_of = datetime.datetime.strptime(str(acct["as_of"])[:19], "%Y-%m-%dT%H:%M:%S")
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise SizeError("%s is not a balance from ibkr_chart.py account (%s): %s" % (path, e, hint))
+    day = to_eastern(as_of).date().isoformat()
+    if day != today:
+        raise SizeError("the IBKR balance in %s is from %s, not today (%s): %s" % (path, day, today, hint))
+    if bal <= 0:
+        raise SizeError("the IBKR balance in %s is %.2f: nothing to trade with" % (path, bal))
+    c = dict(cfg)
+    c["budget"] = round(bal, 2)
+    pct = cfg.get("limits_pct") or {}
+    for usd, key in LIMITS_PCT:
+        if pct.get(key) is not None:
+            c[usd] = math.floor(bal * float(pct[key]) + 1e-6) / 100.0
+    return c, acct
+
+
 def load_config(path):
     cfg = dict(DEFAULTS)
     if path and os.path.exists(path):
@@ -801,7 +839,15 @@ def run_plan(a, cfg):
                          % (sym, ppath, ("from " + to_eastern(t).strftime("%Y-%m-%d %H:%M") + " New York")
                             if t else "undated", FRESH_MINUTES))
     cash = None
-    if a.portfolio and os.path.exists(a.portfolio):
+    cfg, acct = from_account(cfg, a.account, today)
+    if acct:
+        cash = _f(acct.get("cash"))
+        notes.append("Budget = your IBKR balance %s (cash %s, as of %s UTC); limits from limits_pct: "
+                     "max loss %s a trade, %s a day, max order %s." % (
+                         money(cfg["budget"]), money(cash), str(acct.get("as_of"))[:16].replace("T", " "),
+                         money(cfg["max_loss_per_trade_usd"]), money(cfg["max_daily_loss_usd"]),
+                         money(cfg["max_order_usd"])))
+    elif a.portfolio and os.path.exists(a.portfolio):
         pf = read_json(a.portfolio, "portfolio")
         cash = _f(pf.get("cash")) if isinstance(pf, dict) else None
     s = size_trade(plan, cfg, a.budget, limit, price, cash, today)
@@ -849,6 +895,8 @@ def main(argv=None):
     ap.add_argument("--plan", default="trader/plan.json", help="the trade plan (default trader/plan.json)")
     ap.add_argument("--config", default="trader/config.json", help="rules (default trader/config.json)")
     ap.add_argument("--budget", type=float, help="override the budget in the config")
+    ap.add_argument("--account", default="trader/account.json",
+                    help="the IBKR balance, used when the config says \"budget_source\": \"ibkr\"")
     ap.add_argument("--limit", nargs="?", const="plan", metavar="PRICE",
                     help="a limit order instead of market, at the plan's entry or at PRICE")
     ap.add_argument("--prices", help="prices JSON (default trader/prices.json if it exists)")

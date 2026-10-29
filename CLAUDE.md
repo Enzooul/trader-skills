@@ -31,6 +31,13 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
 
 **Conta e posições** vêm da IBKR também (somente leitura): `get_account_summary`, `get_account_balances`, `get_account_positions`, `get_account_orders`, `get_account_trades`. Use-as para "quanto tenho", "o que está aberto" e "o que já operei hoje" (trader-risk e trader-broker).
 
+**Limites pelo saldo** (`"budget_source": "ibkr"` em `trader/config.json`): o orçamento é sempre o saldo da conta, nunca o número fixo `"budget"`. Antes de cada `trader-budget` ou `trader-risk` (e antes do filtro de preço do scanner):
+
+1. `get_account_summary` (use `net_liquidation` e `total_cash_value`) e `get_account_positions`.
+2. Grave: `python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> --cash <total_cash_value> [--position SYM=QTY@CUSTO_MEDIO ...]`. Isso escreve `trader/account.json` (fora do git: o saldo não vai para o repositório público).
+3. `size.py` e `check.py` leem esse arquivo e calculam os limites em dólar pelos percentuais de `limits_pct`: perda máxima por trade 7,5% do saldo, perda máxima no dia 22,5%, ordem máxima 80%. A posição máxima (`max_position_pct`) e a reserva de caixa (`cash_buffer_pct`) já eram percentuais. O filtro de preço do scanner passa a ser saldo × `max_position_pct` / 100.
+4. Se o arquivo faltar ou não for de hoje (Nova York), os scripts **recusam**: leia o saldo de novo. Nunca invente um saldo nem volte para o `"budget"` fixo sem avisar.
+
 **Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
