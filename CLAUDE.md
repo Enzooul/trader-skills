@@ -15,6 +15,22 @@ Este repositório é a oficina de **day trading** (ações dos EUA, só compra/l
 - Se o pedido não bater claramente com uma skill, comece pelo **roteador** indicado no mapa: ele escolhe a especialista.
 - Diga ao usuário, em uma linha, qual skill está usando e por quê.
 
+## Fonte de dados: IBKR primeiro
+
+A conta real do usuário é na Interactive Brokers (IBKR) e os dados devem vir de lá. Os scripts Python não falam com a IBKR (o conector é uma ferramenta do Claude, não uma URL), então a ordem é:
+
+1. **IBKR (principal).** Se as ferramentas `mcp__Interactive_Brokers_IBKR__*` estiverem na sessão, use-as para qualquer preço:
+   - `search_contracts` com o ticker para achar o `contract_id` (linha com `symbol` exato e listagem dos EUA);
+   - `get_price_snapshot` (`contract_id`, `market_data_names` como `["last","bid_ask","prior_close","volume","top_status"]`) para a cotação do momento. `top_status` diz se o dado é `REALTIME` ou `DELAYED`: informe isso ao usuário;
+   - `get_price_history` (`contract_id`, `security_type: "STK"`, `step: "FIVE_MINS"` ou `"ONE_MIN"`, `outside_rth: false`, e `period` **ou** `step_count`, nunca os dois) para barras.
+   Grave a cotação em `trader/prices.json` no formato `{"as_of": "...Z", "source": "ibkr", "prices": {"TSLA": 366.48}}` para o `trader-budget` e o `trader-risk`.
+2. **Yahoo (reserva).** Só quando o conector não estiver na sessão ou falhar. Diga ao usuário, em uma linha, que o dado veio da reserva e por quê (ex.: "IBKR respondeu 503").
+3. Nunca misture fontes sem avisar, e nunca invente um preço se as duas falharem.
+
+O conector da IBKR é **só para dados** nesta oficina. Ferramentas que mexem na conta (`create_order_instruction`, `delete_order_instruction`, alertas e watchlists na conta) só com pedido explícito do usuário, e ordens sempre passam por `trader-risk` e pelo "sim" do usuário. A conta é **real** (`"paper": false` em `trader/config.json`).
+
+Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
+
 ## Arquivos gerados
 
 Sessões na nuvem são apagadas ao terminar. Quando uma skill gerar um arquivo que valha guardar (relatório, plano, contexto), salve-o dentro deste repositório e ofereça fazer commit.
