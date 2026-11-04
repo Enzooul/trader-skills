@@ -172,6 +172,10 @@ is why the ticket, trader-risk and the user's word-for-word yes come first.
    response or `get_open_position`), or `--status denied`, or `--status failed`
    with `--note`. A failed order is not retried without a new check and a new yes.
    The log keeps the entry's max loss for trader-risk's daily limit.
+6. Journal it (trader-journal): `journal.py plan` for the plan as sent,
+   `journal.py decide --status operado` (or `recusado` / `nao_confirmado` when
+   no yes came), `--superseded-by` on the radar's row of the same breakout,
+   and after the fill `journal.py ibkr-trades --in <get_account_trades answer>`.
 
 ## Steps: while it is open, and out by the close
 
