@@ -20,6 +20,14 @@ Usage:
     python3 ibkr_chart.py bars --in ibkr_answer.json --symbol AAPL --prev-close 351.10
     python3 ibkr_chart.py price --symbol AAPL --price 349.26 --time 1793281748 --status REALTIME
     python3 ibkr_chart.py account --net-liq 357.48 --cash 357.48 [--position AAPL=2@349.10]
+    python3 ibkr_chart.py account --net-liq 528.73 --cash 528.73 --positions pos.json \\
+        --orders orders.json --trades trades.json
+
+account: --positions, --orders and --trades take the raw get_account_positions,
+get_account_orders and get_account_trades answers saved as-is. --orders runs
+the stop guard (every open position needs a working sell stop at the broker);
+--trades records today's entries and realized P&L, which trader-risk counts
+in the daily limits (it refuses a balance without them).
 
 The bars input is either the raw get_price_history answer saved as-is
 (columns "time", "open", "high", "low", "close", "volume", ISO times at each
@@ -37,6 +45,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 
 INTERVALS = {"1m": 60, "5m": 300}
@@ -190,19 +199,186 @@ def _position(text):
     return pos
 
 
+# ---------------------------------------------------------------- New York day (no tz files)
+
+def _nth_sunday(year, month, n):
+    d = dt.date(year, month, 1)
+    d += dt.timedelta(days=(6 - d.weekday()) % 7)
+    return d + dt.timedelta(weeks=n - 1)
+
+
+def ny_date(utc):
+    """naive or aware UTC datetime -> the New York calendar date (US DST rule since 2007)."""
+    naive = utc.replace(tzinfo=None)
+    start = dt.datetime.combine(_nth_sunday(naive.year, 3, 2), dt.time(7, 0))
+    end = dt.datetime.combine(_nth_sunday(naive.year, 11, 1), dt.time(6, 0))
+    return (naive + dt.timedelta(hours=-4 if start <= naive < end else -5)).date()
+
+
+def _utc(text):
+    try:
+        return dt.datetime.strptime(str(text)[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        raise IBKRError("time %r is not like 2026-11-05T15:41:38Z" % (text,))
+
+
+def _load(path, what):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError) as e:
+        raise IBKRError("cannot read the %s answer %s: %s" % (what, path, e))
+
+
+def _num(x):
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def positions_from_ibkr(doc):
+    """Raw get_account_positions answer -> positions (closed rows with position 0 dropped).
+    Seen 2026-11-05: {"positions":[{"contract_description":"ACAD","position":0,
+    "average_price":0,"asset_class":"STK",...}]}. average_price includes the commission."""
+    out = []
+    for p in (doc.get("positions") if isinstance(doc, dict) else doc) or []:
+        qty = _num(p.get("position"))
+        sym = str(p.get("contract_description") or p.get("symbol") or "").upper().strip()
+        if not sym or not qty:
+            continue
+        pos = {"ticker": sym, "shares": qty}
+        avg = _num(p.get("average_price"))
+        if avg:
+            pos["lots"] = [{"shares": qty, "cost": round(qty * avg, 2)}]
+        out.append(pos)
+    return out
+
+
+DONE_ORDER = {"FILLED", "CANCELLED", "CANCELED", "EXPIRED", "REJECTED", "INACTIVE", "API_CANCELLED"}
+STOP_TYPES = {"STOP", "STP", "STOP_LIMIT", "STP_LMT", "TRAIL", "TRAILING_STOP"}
+
+
+def stops_from_orders(doc):
+    """Raw get_account_orders answer -> {SYM: [(stop_price, shares)]} for WORKING sell stops.
+    Seen 2026-11-05: orders carry no symbol field; it is the last word of
+    primary_description ("Sold 19 ACAD"), and the stop price is in
+    secondary_description ("STP 21.72, Day")."""
+    out = {}
+    for o in (doc.get("orders") if isinstance(doc, dict) else doc) or []:
+        if str(o.get("side", "")).upper() != "SELL":
+            continue
+        if str(o.get("order_type", "")).upper() not in STOP_TYPES:
+            continue
+        if str(o.get("order_status", "")).upper() in DONE_ORDER:
+            continue
+        sym = str(o.get("symbol") or "").upper().strip()
+        if not sym:
+            words = str(o.get("primary_description") or "").split()
+            sym = words[-1].upper() if words else ""
+        price = _num(o.get("stop_price") or o.get("aux_price"))
+        if not price:
+            m = re.search(r"(?:STP|STOP)\s+([0-9]+(?:\.[0-9]+)?)", str(o.get("secondary_description") or ""), re.I)
+            price = float(m.group(1)) if m else None
+        qty = _num(o.get("remaining_shares_qty")) or _num(o.get("total_shares_qty")) or 0
+        if sym:
+            out.setdefault(sym, []).append((price, qty))
+    return out
+
+
+def day_from_trades(doc, day, held):
+    """Raw get_account_trades answer -> what happened on the New York day `day`:
+    entries (distinct buy orders), realized P&L (IBKR's realized_pnl of the sells,
+    commissions of both legs included) and the commission already paid on buys
+    that are still open (not in realized_pnl yet)."""
+    fills, buys, realized, open_comm, missing = [], set(), 0.0, 0.0, 0
+    for t in (doc.get("trades") if isinstance(doc, dict) else doc) or []:
+        if str(t.get("sec_type") or "STK").upper() != "STK":
+            continue
+        when = _utc(t.get("trade_time"))
+        if ny_date(when) != day:
+            continue
+        side = str(t.get("side", "")).upper()
+        sym = str(t.get("symbol", "")).upper()
+        comm = _num(t.get("commission")) or 0.0
+        pnl = _num(t.get("realized_pnl"))
+        fills.append({"symbol": sym, "side": side, "size": _num(t.get("size")), "price": _num(t.get("price")),
+                      "time": str(t.get("trade_time")), "commission": round(comm, 4),
+                      "realized_pnl": None if pnl is None else round(pnl, 4)})
+        if side == "BUY":
+            buys.add(str(t.get("order_id") or t.get("trade_id")))
+            if sym in held:
+                open_comm += comm
+        elif side == "SELL":
+            if pnl is None:
+                missing += 1
+                pnl = -comm
+            realized += pnl
+    return {"date": day.isoformat(), "source": "ibkr get_account_trades", "entries": len(buys),
+            "realized": round(realized, 2), "open_commission": round(open_comm, 2),
+            "sells_without_realized_pnl": missing, "fills": fills}
+
+
 def cmd_account(a):
     if a.net_liq <= 0:
         raise IBKRError("--net-liq must be above zero (net_liquidation from get_account_summary)")
     cash = a.net_liq if a.cash is None else a.cash
-    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_dt = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    positions = positions_from_ibkr(_load(a.positions, "get_account_positions")) if a.positions else []
+    have = {p["ticker"] for p in positions}
+    positions += [p for p in (_position(x) for x in a.position or []) if p["ticker"] not in have]
     doc = {"as_of": now, "source": "ibkr", "currency": "USD",
-           "note": "IBKR get_account_summary (net_liquidation, total_cash_value) and get_account_positions. "
-                   "trader-budget and trader-risk only trust it on the New York day of as_of.",
+           "note": "IBKR get_account_summary (net_liquidation, total_cash_value), get_account_positions, "
+                   "get_account_orders and get_account_trades. trader-budget and trader-risk only trust it "
+                   "on the New York day of as_of.",
            "net_liquidation": round(float(a.net_liq), 2), "cash": round(float(cash), 2),
-           "positions": [_position(x) for x in a.position or []]}
+           "positions": positions}
+    guard = []
+    if a.orders:
+        stops = stops_from_orders(_load(a.orders, "get_account_orders"))
+        doc["stops_checked"] = True
+        for p in positions:
+            legs = stops.get(p["ticker"], [])
+            covered = sum(q for _, q in legs)
+            prices = [x for x, _ in legs if x]
+            if prices:
+                p["stop"] = max(prices)
+            p["stop_shares"] = covered
+            if covered >= p["shares"] - 1e-9 and prices:
+                guard.append("OK       %s: %s shares, stop %.2f at the broker" % (p["ticker"], _fmt(p["shares"]), p["stop"]))
+            elif covered > 0:
+                guard.append("PARTIAL  %s: %s shares but the stop at the broker covers only %s" % (
+                    p["ticker"], _fmt(p["shares"]), _fmt(covered)))
+            else:
+                guard.append("NO STOP  %s: %s shares and no working sell stop at the broker" % (
+                    p["ticker"], _fmt(p["shares"])))
+    if a.trades:
+        # IBKR's average_price already includes the buy commission; a --position cost may not
+        doc["today"] = day_from_trades(_load(a.trades, "get_account_trades"), ny_date(now_dt),
+                                       {p["ticker"] for p in positions if p["ticker"] not in have})
     _write(a.write, doc)
     print("IBKR balance %s, cash %s, %d open position(s) -> %s" % (
         "$%.2f" % doc["net_liquidation"], "$%.2f" % doc["cash"], len(doc["positions"]), a.write))
+    if "today" in doc:
+        t = doc["today"]
+        print("Today (%s, New York): %d entr%s, realized %s, open-buy commission $%.2f" % (
+            t["date"], t["entries"], "y" if t["entries"] == 1 else "ies",
+            ("-$%.2f" % -t["realized"]) if t["realized"] < 0 else "$%.2f" % t["realized"], t["open_commission"]))
+    else:
+        print("WARNING: no --trades: trader-risk refuses without today's IBKR trades (get_account_trades)")
+    if a.orders:
+        print("STOP GUARD:" if positions else "STOP GUARD: no open positions")
+        for g in guard:
+            print("  " + g)
+        if any(not g.startswith("OK") for g in guard):
+            print("ALERT: a position is not fully protected. Say it FIRST in the message to the user.")
+    elif positions:
+        print("WARNING: no --orders: the stops of the open positions were not checked")
+
+
+def _fmt(x):
+    return str(int(x)) if float(x) == int(x) else "%.4f" % x
 
 
 def main(argv=None):
@@ -224,6 +400,9 @@ def main(argv=None):
     c.add_argument("--net-liq", required=True, type=float, help="net_liquidation from get_account_summary")
     c.add_argument("--cash", type=float, help="total_cash_value (default: the same as --net-liq)")
     c.add_argument("--position", action="append", help="SYM=QTY or SYM=QTY@AVG_COST, once per open position")
+    c.add_argument("--positions", help="raw get_account_positions answer saved as-is (instead of --position)")
+    c.add_argument("--orders", help="raw get_account_orders answer: checks every open position has a stop")
+    c.add_argument("--trades", help="raw get_account_trades answer (period DAYS_7): today's entries and realized P&L")
     c.add_argument("--write", default="trader/account.json")
     a = ap.parse_args(argv)
     try:

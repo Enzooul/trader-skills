@@ -160,7 +160,9 @@ is why the ticket, trader-risk and the user's word-for-word yes come first.
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT
    READY or BLOCKED goes back to `/trader-risk`.
 2. Show ONE ticket and ask: "Place this order? Reply yes or no." One order
-   per question. Never offer "yes to all".
+   per question. Never offer "yes to all". In Portuguese, "sim" (or "s")
+   counts like "yes", and "não", "espera", "mas", "talvez" or "todas" make it
+   a no, the same as their English words.
 3. Run `ticket.py approve --index N --reply "<the user's reply, word for word>"`.
    If it prints "Not recorded", the reply was not an explicit yes for this
    order (for example "sure", "yes to all", or a yes that names a different

@@ -356,6 +356,12 @@ def from_account(cfg, path, today):
         raise RiskError("the IBKR balance in %s is from %s, not today (%s): %s" % (path, day, today, hint))
     if bal <= 0:
         raise RiskError("the IBKR balance in %s is %.2f: nothing to trade with" % (path, bal))
+    tday = acct.get("today") if isinstance(acct.get("today"), dict) else None
+    if not tday or tday.get("date") != today:
+        raise RiskError("%s has no IBKR trades for today (%s), so the daily loss and trade limits cannot "
+                        "count what was really done: read get_account_trades (period DAYS_7), save the answer "
+                        "and add --trades <file> (and --orders <get_account_orders file>) to ibkr_chart.py "
+                        "account" % (path, today))
     c = dict(cfg)
     c["budget"] = round(bal, 2)
     pct = cfg.get("limits_pct") or {}
@@ -409,11 +415,45 @@ def day_trades(state, today):
 
 # ---------------------------------------------------------------- the check
 
-def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None):
+def broker_today(day, positions):
+    """What IBKR says already happened today (account.json "today", from get_account_trades)
+    plus what the open positions can still lose at their broker stops.
+    Returns (entries, loss_used, unprotected, notes)."""
+    entries = int(day.get("entries") or 0)
+    realized = _f(day.get("realized")) or 0.0
+    loss = max(0.0, -realized) + (_f(day.get("open_commission")) or 0.0)
+    unprotected, notes, open_risk = [], [], 0.0
+    for p in positions or []:
+        t = str(p.get("ticker") or p.get("symbol") or "").upper()
+        n = _f(p.get("shares")) or 0
+        if not t or n <= 0:
+            continue
+        stop, covered = _f(p.get("stop")), _f(p.get("stop_shares"))
+        cost = sum(_f(l.get("cost")) or 0 for l in p.get("lots", []))
+        if not stop or covered is None or covered < n - 1e-9:
+            unprotected.append(t)
+            continue
+        if cost:
+            open_risk += max(0.0, cost - n * stop)
+        else:
+            notes.append("%s: no average cost, so its risk at the stop is not counted" % t)
+    if realized:
+        notes.append("IBKR realized today: %s%s (commissions included)" % ("-" if realized < 0 else "+",
+                                                                              money(abs(realized))))
+    if open_risk:
+        notes.append("open positions can still lose %s at their broker stops" % money(open_risk))
+    return entries, round(loss + open_risk, 2), unprotected, notes
+
+
+def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None,
+          broker_day=None):
     """Pure function. Returns {"results": [...], "pass": n, "block": n, "warnings": [...]}.
 
     now          naive UTC (default: the real clock); its New York date is "today"
-    price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh"""
+    price_times  {SYM: naive UTC time of that price}; None = every price counts as fresh
+    broker_day   account.json "today" (IBKR get_account_trades): the daily limits count the
+                 larger of it and the trader-broker log, and an open position without a
+                 working stop at the broker blocks new entries"""
     c = dict(DEFAULTS)
     c.update(cfg or {})
     prices = {str(k).upper(): float(v) for k, v in (prices or {}).items() if _f(v)}
@@ -433,6 +473,19 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                             "the daily loss" % (r.get("side"), r.get("symbol")))
         else:
             loss_today += ml
+    n_entries = len(entries_today)
+    unprotected = []
+    if broker_day is not None:
+        ib_n, ib_loss, unprotected, ib_notes = broker_today(broker_day, (portfolio or {}).get("positions"))
+        n_entries = max(n_entries, ib_n)
+        loss_today = max(loss_today, ib_loss)
+        top_warn.extend(ib_notes)
+        if unprotected and not broker_day.get("stops_checked"):
+            top_warn.append("the stops of %s were not checked: add --orders <get_account_orders answer> to "
+                            "ibkr_chart.py account" % ", ".join(unprotected))
+        elif unprotected:
+            top_warn.append("NO STOP AT THE BROKER for %s: attach the stop in the IBKR app first"
+                            % ", ".join(unprotected))
     placed_keys = {(str(r.get("symbol", "")).upper(), r.get("side")) for r in done_today}
     win_reasons, win_warns = window_check(now_et, c)
     pdt_n, pdt_list = day_trades(state, today) if c.get("pdt_guard") else (0, [])
@@ -659,9 +712,12 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                  "daily loss limit" % (money(used), money(max_loss), money(used + max_loss),
                                                        money(daily)))
             cap_t = int(c.get("max_trades_per_day") or 0)
-            if cap_t and len(entries_today) + batch_entries >= cap_t:
+            if cap_t and n_entries + batch_entries >= cap_t:
                 later.append("trades: %d entries placed today plus %d passed earlier in this batch, your limit "
-                             "is %d a day" % (len(entries_today), batch_entries, cap_t))
+                             "is %d a day" % (n_entries, batch_entries, cap_t))
+            if unprotected:
+                later.append("unprotected: %s open without a working stop at the broker; no new entry until "
+                             "it has one" % ", ".join(unprotected))
             later.extend(win_reasons)
             if c.get("pdt_guard") and pdt_n >= 3:
                 later.append("pdt: %d day trades in the last 5 business days (%s); a 4th trips the "
@@ -678,7 +734,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                (" (min %s)" % _num(c["min_reward_risk"])) if _f(c.get("min_reward_risk")) else ""))
             if daily or cap_t:
                 info.append("today before this: %d of %s trades, %s of %s daily loss"
-                            % (len(entries_today) + batch_entries, cap_t or "unlimited",
+                            % (n_entries + batch_entries, cap_t or "unlimited",
                                money(loss_today + batch_loss), money(daily) if daily else "no limit on"))
 
         # duplicates and the daily order limit
@@ -739,7 +795,7 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         "block": sum(1 for r in results if r["verdict"] == "BLOCK"),
         "warnings": top_warn,
         "cash_after": round(acct["cash"], 2),
-        "today": {"orders_placed": count_today, "entries_placed": len(entries_today),
+        "today": {"orders_placed": count_today, "entries_placed": n_entries,
                   "loss_at_risk": round(loss_today, 2), "day_trades_5d": pdt_n if c.get("pdt_guard") else None},
     }
 
@@ -838,7 +894,9 @@ def main(argv=None):
         pdoc = read_json(a.prices, "prices", required=False) or {}
         prices, times = load_prices(pdoc)
         state = read_json(a.state, "broker state", required=False)
-        res = check(orders, cfg, portfolio, prices, state, a.today, now, times)
+        res = check(orders, cfg, portfolio, prices, state, a.today, now, times,
+                    broker_day=dict(acct["today"], stops_checked=bool(acct.get("stops_checked")))
+                    if acct else None)
         if pdoc.get("as_of"):
             res["prices_as_of"] = pdoc["as_of"]
         if not a.no_write:

@@ -33,10 +33,15 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
 
 **Limites pelo saldo** (`"budget_source": "ibkr"` em `trader/config.json`): o orçamento é sempre o saldo da conta, nunca o número fixo `"budget"`. Antes de cada `trader-budget` ou `trader-risk` (e antes do filtro de preço do scanner):
 
-1. `get_account_summary` (use `net_liquidation` e `total_cash_value`) e `get_account_positions`.
-2. Grave: `python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> --cash <total_cash_value> [--position SYM=QTY@CUSTO_MEDIO ...]`. Isso escreve `trader/account.json` (fora do git: o saldo não vai para o repositório público).
+1. `get_account_summary` (use `net_liquidation` e `total_cash_value`), `get_account_positions`, `get_account_orders` e `get_account_trades` com `period: "DAYS_7"`. Salve as três últimas respostas como vieram, cada uma num arquivo.
+2. Grave: `python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> --cash <total_cash_value> --positions <posições> --orders <ordens> --trades <trades>`. Isso escreve `trader/account.json` (fora do git: o saldo não vai para o repositório público) com os trades de hoje (entradas e resultado realizado) e o stop de cada posição. `--position SYM=QTY@CUSTO_MEDIO` ainda funciona se a resposta de posições faltar.
 3. `size.py` e `check.py` leem esse arquivo e calculam os limites em dólar pelos percentuais de `limits_pct`: perda máxima por trade 7,5% do saldo, perda máxima no dia 22,5%, ordem máxima 80%. A posição máxima (`max_position_pct`) e a reserva de caixa (`cash_buffer_pct`) já eram percentuais. O filtro de preço do scanner passa a ser saldo × `max_position_pct` / 100.
 4. Se o arquivo faltar ou não for de hoje (Nova York), os scripts **recusam**: leia o saldo de novo. Nunca invente um saldo nem volte para o `"budget"` fixo sem avisar.
+5. O `check.py` também recusa sem os trades de hoje (`--trades`): a perda do dia e o número de trades contam o que a IBKR diz que aconteceu, não só o registro do `trader-broker`.
+
+**Vigia do stop** (todo Radar, todo Zerar posições e antes de cada ordem): o `ibkr_chart.py account --orders` imprime `STOP GUARD` com uma linha por posição aberta: `OK`, `PARTIAL` (o stop cobre menos ações que a posição) ou `NO STOP`. Se aparecer `ALERT`, essa é a **primeira linha** da mensagem ao usuário, em destaque (ex.: "TOST: 9 ações sem stop na corretora"), e o `check.py` bloqueia entradas novas até o stop estar lá. Ler ordens é só leitura; quem anexa o stop é o Cristian, no app. No Zerar posições, se houver posição aberta, diga ações, preço atual e o resultado se zerar agora; a venda só com o "sim" dele.
+
+**Caixa preso:** se houver posição aberta e o caixa livre (depois da reserva) não comprar ações suficientes para um plano positivo no alvo depois da comissão, diga isso na primeira linha do Radar ("caixa livre US$ X: trades novos limitados") e mostre só os planos que ficam positivos no alvo.
 
 **Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
