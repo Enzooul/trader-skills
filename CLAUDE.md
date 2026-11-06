@@ -27,20 +27,40 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
    `python3 .claude/skills/trader-alerts/ibkr_chart.py bars --in <arquivo> --symbol AAPL --out trader/ibkr`
    (`--prev-close` é opcional). Depois rode os scripts com `--offline trader/ibkr/<SYM>.json` (entry, exit, scanner orb) ou `--offline trader/ibkr` (timemachine). As mensagens dos scripts ainda dizem "Yahoo" no cabeçalho: o dado é da IBKR, diga isso ao usuário.
 4. **O scan amplo** (`scan.py universe` e `scan.py daily`, ~5.900 ações) continua no Yahoo, porque pedir milhares de gráficos ao conector um por um não é viável. Os candidatos finais são sempre confirmados com barras e cotação da IBKR antes de entry/exit/budget/risk.
+   **Screener da IBKR (somado ao Yahoo):** no Radar, rode também `preview_screener` (só leitura; **nunca** `create_saved_screener` sem pedido) com `selector: "STK"`, `locations: ["STK.US.MAJOR"]`, `scanner: "SCAN_changeOpenPerc_DESC"`, `max_results: 50` e os filtros `usdPriceAbove` 5, `usdPriceBelow` (saldo × `max_position_pct` / 100), `avgUsdVolumeAbove` 20000000, `openGapPercAbove` 2, `stVolumeVsAvg5minAbove` 2 (testados em 06/11: 59 ações às 10:22 ET). Salve a resposta e rode `ibkr_chart.py screener --in <arquivo>`: ele escreve `trader/ibkr-screener.txt`. Junte esses nomes à lista do Yahoo no `scan.py orb --watchlist` e diga quantos vieram só da IBKR. Registre no diário os planos que vieram **só** do screener com `--tag ibkr_screener`, para a revisão comparar as duas fontes. A resposta traz só nomes e `contract_id` (sem preços), e o `contract_id` dispensa o `search_contracts`. No teste de 06/11 os valores bateram com cotações REALTIME da IBKR (ordem por variação desde a abertura e gap conferidos em 3 ações).
 5. **Reserva:** só quando o conector não estiver na sessão ou falhar (já respondeu "Service Unavailable" algumas vezes). Use o Yahoo e diga, em uma linha, que o dado veio da reserva e por quê. Nunca misture fontes sem avisar e nunca invente um preço.
 
 **Conta e posições** vêm da IBKR também (somente leitura): `get_account_summary`, `get_account_balances`, `get_account_positions`, `get_account_orders`, `get_account_trades`. Use-as para "quanto tenho", "o que está aberto" e "o que já operei hoje" (trader-risk e trader-broker).
 
 **Limites pelo saldo** (`"budget_source": "ibkr"` em `trader/config.json`): o orçamento é sempre o saldo da conta, nunca o número fixo `"budget"`. Antes de cada `trader-budget` ou `trader-risk` (e antes do filtro de preço do scanner):
 
-1. `get_account_summary` (use `net_liquidation` e `total_cash_value`) e `get_account_positions`.
-2. Grave: `python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> --cash <total_cash_value> [--position SYM=QTY@CUSTO_MEDIO ...]`. Isso escreve `trader/account.json` (fora do git: o saldo não vai para o repositório público).
+1. `get_account_summary` (use `net_liquidation` e `total_cash_value`), `get_account_positions`, `get_account_orders` e `get_account_trades` com `period: "DAYS_7"`. Salve as três últimas respostas como vieram, cada uma num arquivo.
+2. Grave: `python3 .claude/skills/trader-alerts/ibkr_chart.py account --net-liq <net_liquidation> --cash <total_cash_value> --positions <posições> --orders <ordens> --trades <trades>`. Isso escreve `trader/account.json` (fora do git: o saldo não vai para o repositório público) com os trades de hoje (entradas e resultado realizado) e o stop de cada posição. `--position SYM=QTY@CUSTO_MEDIO` ainda funciona se a resposta de posições faltar.
 3. `size.py` e `check.py` leem esse arquivo e calculam os limites em dólar pelos percentuais de `limits_pct`: perda máxima por trade 7,5% do saldo, perda máxima no dia 22,5%, ordem máxima 80%. A posição máxima (`max_position_pct`) e a reserva de caixa (`cash_buffer_pct`) já eram percentuais. O filtro de preço do scanner passa a ser saldo × `max_position_pct` / 100.
 4. Se o arquivo faltar ou não for de hoje (Nova York), os scripts **recusam**: leia o saldo de novo. Nunca invente um saldo nem volte para o `"budget"` fixo sem avisar.
+5. O `check.py` também recusa sem os trades de hoje (`--trades`): a perda do dia e o número de trades contam o que a IBKR diz que aconteceu, não só o registro do `trader-broker`.
+
+**Vigia do stop** (todo Radar, todo Zerar posições e antes de cada ordem): o `ibkr_chart.py account --orders` imprime `STOP GUARD` com uma linha por posição aberta: `OK`, `PARTIAL` (o stop cobre menos ações que a posição) ou `NO STOP`. Se aparecer `ALERT`, essa é a **primeira linha** da mensagem ao usuário, em destaque (ex.: "TOST: 9 ações sem stop na corretora"), e o `check.py` bloqueia entradas novas até o stop estar lá. Ler ordens é só leitura; quem anexa o stop é o Cristian, no app. No Zerar posições, se houver posição aberta, diga ações, preço atual e o resultado se zerar agora; a venda só com o "sim" dele.
+
+**Caixa preso:** se houver posição aberta e o caixa livre (depois da reserva) não comprar ações suficientes para um plano positivo no alvo depois da comissão, diga isso na primeira linha do Radar ("caixa livre US$ X: trades novos limitados") e mostre só os planos que ficam positivos no alvo.
 
 **Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
+
+## Ciclo de aprendizado (diário de operações)
+
+Toda decisão parte do que as anteriores ensinaram. O diário fica em `/mnt/project-files/diario/` (pasta compartilhada do projeto, privada; **não** no git, porque o repositório é público e o diário tem dólares e trades reais). Detalhes em `.claude/skills/trader-journal/SKILL.md`. Abaixo, `J` = `python3 .claude/skills/trader-journal/journal.py`.
+
+- **Pré-voo** (primeiro passo do Pré-mercado, de cada Radar e do Zerar posições): teste a IBKR com um `get_price_snapshot` e um `get_price_history` da AAPL (contrato 265598), grave o `account.json` (seção "Limites pelo saldo") e rode `python3 .claude/skills/trader-alerts/preflight.py --quote ok|fail --bars ok|fail --stage premarket|radar|flat`. **VERMELHO** é a primeira linha da mensagem e nenhum plano novo sai até resolver; **AMARELO** é dito em uma linha (ex.: barras do Yahoo). O resultado também vale como observação no diário quando for vermelho.
+- **Balanço ou notícia forte no dia:** registre o plano com `--tag balanco` (o `trader-news` e o `trader-analyst` dizem se a ação tem balanço hoje ou ontem depois do fechamento). Assim a revisão separa esses dias dos comuns.
+- **Pré-mercado**, antes do scan: `get_account_trades` com `period: "DAYS_7"`, salve a resposta como veio e rode `$J ibkr-trades --in <arquivo>`. Para os planos de ontem sem resultado (`$J show --date <ontem>`), puxe as barras de 5 min da IBKR (`period: "TWO_DAYS"`), converta com `ibkr_chart.py bars --out trader/ibkr` e rode `$J simulate --date <ontem> --bars trader/ibkr`. Depois, `$J lessons`.
+- **Radar**, antes de escolher: `$J lessons`. Aplique as **Regras aprovadas**; as **Observações** são só contexto. Se houver posição aberta de outro dia, diga isso primeiro. Depois do resumo, registre **cada** plano mostrado: `$J plan --symbol X --entry E --stop S --target T --shares N --time <hora do post ET> --signal-time <hora do rompimento> --risk PASS|FAIL --tm-mean-r <R médio> --data ibkr`.
+- **Thread de ordem** ("quero operar X"): registre o plano refeito com `$J plan`, a resposta do Cristian com `$J decide` (`operado` depois do "sim"; `recusado` ou `nao_confirmado` se não), e marque a linha do radar com `--superseded-by <id novo>`. Depois da execução, `$J ibkr-trades`.
+- **Zerar posições**: `get_account_trades` (`TODAY`) → `$J ibkr-trades`, e diga quais linhas seguem abertas.
+- **Revisão semanal** (sexta depois do fechamento ou sábado): `$J review`, poste o relatório (ele já traz "A máquina do tempo prevê o resultado?", com o critério combinado em 06/11: com 30 casos de cada lado, se o lado R médio > 0 não for melhor com p < 0,05, propor tirar a máquina do tempo da regra) e pergunte ao Cristian sobre cada proposta, um "sim" por proposta. Uma regra só entra em `licoes.md` com `$J note --rule --approved-by "<quem, onde, quando>"` depois desse "sim"; se mexer num script ou no `trader/config.json`, vai por PR.
+- **Nunca** mude uma regra por conta própria nem por uma faixa marcada como "amostra insuficiente" (menos de `journal.min_sample` = 30 casos). Com pouca amostra, "aprender" é ajustar a estratégia ao acaso (overfitting). Lições de processo (um script que conta errado, um tipo de ordem que o conector não tem) podem ser registradas na hora como observação.
+- Se a pasta `/mnt/project-files` não existir na sessão, o script avisa e grava em `trader/diario`, que se perde: avise o Cristian.
 
 ## Arquivos gerados
 
@@ -48,7 +68,7 @@ Sessões na nuvem são apagadas ao terminar. Quando uma skill gerar um arquivo q
 
 ## Mapa de pedidos
 
-Ordem do dia: `trader-scanner` → `trader-news` → `trader-entry` → `trader-exit` → `trader-timemachine` → `trader-budget` → `trader-risk` → `trader-broker`, com `trader-alerts` vigiando stop, alvo e horário.
+Ordem do dia: `trader-journal lessons` → `trader-scanner` → `trader-news` → `trader-entry` → `trader-exit` → `trader-timemachine` → `trader-budget` → `trader-risk` → `trader-broker`, com `trader-alerts` vigiando stop, alvo e horário, e `trader-journal` registrando cada plano, decisão e resultado.
 
 | Pedido em português | Skill |
 |---|---|
@@ -63,6 +83,7 @@ Ordem do dia: `trader-scanner` → `trader-news` → `trader-entry` → `trader-
 | "me avisa se bater o preço", "o mercado está aberto?", "cotação de X" | `trader-alerts` |
 | "como foi o balanço?", "o que mudou no trimestre?", "10-Q" | `trader-analyst` |
 | "o que a Pelosi comprou?", "trades do Congresso" | `trader-pelosi` |
+| "o que aprendemos?", "revisão semanal", "registra o trade", "como estão os resultados?", "estou melhorando?" | `trader-journal` |
 | "isso é estatisticamente significativo?", "é sorte ou é real?", "quantos trades preciso para saber?" | `statistical-analyst` |
 | "esses dados estão certos?", "tem buraco/outlier nas cotações?" | `data-quality-auditor` |
 

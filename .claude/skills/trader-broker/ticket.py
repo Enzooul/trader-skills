@@ -40,6 +40,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 
 ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
@@ -49,10 +50,13 @@ STRING_FIELDS = ("qty", "notional", "limit_price", "stop_price", "trail_price", 
                  "take_profit_limit_price", "stop_loss_stop_price", "stop_loss_limit_price")
 TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at the open",
              "cls": "at the close", "ioc": "immediate or cancel", "fok": "fill or kill"}
-YES_WORDS = ("yes", "y")
-BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each"}
+YES_WORDS = ("yes", "y", "sim", "s")   # the user writes in Portuguese: "sim" counts like "yes"
+BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each",
+               "todas", "todos", "tudo", "ambas", "ambos", "lote"}
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
-               "hold", "unless", "if"}
+               "hold", "unless", "if",
+               "nao", "espera", "espere", "aguarda", "cancela", "cancele", "mas", "talvez", "depois",
+               "se", "porem", "segura", "exceto", "menos"}
 
 
 class TicketError(Exception):
@@ -275,9 +279,10 @@ def parse_yes(reply, order, batch_symbols=()):
         return False, "the reply is empty"
     if "?" in raw:
         return False, "the reply is a question, not a yes"
-    words = re.findall(r"[a-z']+", raw.lower())
+    plain_text = "".join(ch for ch in unicodedata.normalize("NFKD", raw.lower()) if not unicodedata.combining(ch))
+    words = re.findall(r"[a-z']+", plain_text)
     if not words or words[0] not in YES_WORDS:
-        return False, "only a reply that starts with \"yes\" counts (not ok, sure, go, do it)"
+        return False, "only a reply that starts with \"yes\" or \"sim\" counts (not ok, pode, manda, vai)"
     if BATCH_WORDS & set(words):
         return False, "a yes covers one order at a time, not a batch"
     if DOUBT_WORDS & set(words[1:]):
@@ -373,7 +378,7 @@ def render(order, idx, total, cfg, risk, state, today):
             lines.append("  Alpaca places the entry, then the stop-loss and the take-profit as two orders")
             lines.append("  that cancel each other: when one fills, the other is canceled.")
     if ready:
-        lines.append("  Reply \"yes\" to place this one order, or \"no\" to skip it.")
+        lines.append("  Reply \"yes\" (or \"sim\") to place this one order, or \"no\" to skip it.")
         if broker != "ibkr":
             lines.append("  Claude's own card then asks again: Allow once places it, Deny stops it.")
     return "\n".join(lines), ready

@@ -142,6 +142,11 @@ are in the calendar.
 
 ## Steps
 
+0. Before any scan in a routine (Pre-mercado, Radar): `/trader-journal lessons`
+   (`python3 .claude/skills/trader-journal/journal.py lessons`). Apply its
+   approved rules, mention the observations that matter today, and after the
+   summary record every plan you showed with `journal.py plan` (see
+   trader-journal and CLAUDE.md, "Ciclo de aprendizado").
 1. Once a week or so: `scan.py universe`.
 2. Before the open: `scan.py daily`. Tell the user the counts (fetched,
    liquid, scanned, hits) and the top few by setup.

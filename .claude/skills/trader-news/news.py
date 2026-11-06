@@ -43,6 +43,7 @@ import datetime as _dt
 import email.utils
 import gzip
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -189,6 +190,10 @@ class Fetcher(object):
             raise NewsError("HTTP %s for %s" % (exc.code, url))
         except urllib.error.URLError as exc:
             raise NewsError("could not reach %s: %s" % (url, exc.reason))
+        except (TimeoutError, OSError, EOFError, http.client.HTTPException) as exc:
+            # a read that times out (seen on an SEC feed, 2026-11-05) or a cut connection:
+            # one feed failing must not stop the others
+            raise NewsError("reading %s failed: %s" % (url, exc.__class__.__name__ + (": %s" % exc if str(exc) else "")))
 
 
 def yahoo_symbol(ticker):
