@@ -27,5 +27,12 @@
   "allow_margin": false,
   "allow_short": false,
   "pdt_guard": false,
-  "sec_user_agent": "Enzo Schleu Serra Duques Santa Ritta enzosantaritta@gmail.com"
+  "sec_user_agent": "Enzo Schleu Serra Duques Santa Ritta enzosantaritta@gmail.com",
+  "journal": {
+    "dir": "/mnt/project-files/diario",
+    "min_sample": 30,
+    "lookback_days": 20,
+    "commission_round_trip": 2.0,
+    "min_risk_per_share": 0.5
+  }
 }

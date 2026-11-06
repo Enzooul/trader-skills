@@ -47,13 +47,25 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
 
+## Ciclo de aprendizado (diário de operações)
+
+Toda decisão parte do que as anteriores ensinaram. O diário fica em `/mnt/project-files/diario/` (pasta compartilhada do projeto, privada; **não** no git, porque o repositório é público e o diário tem dólares e trades reais). Detalhes em `.claude/skills/trader-journal/SKILL.md`. Abaixo, `J` = `python3 .claude/skills/trader-journal/journal.py`.
+
+- **Pré-mercado**, antes do scan: `get_account_trades` com `period: "DAYS_7"`, salve a resposta como veio e rode `$J ibkr-trades --in <arquivo>`. Para os planos de ontem sem resultado (`$J show --date <ontem>`), puxe as barras de 5 min da IBKR (`period: "TWO_DAYS"`), converta com `ibkr_chart.py bars --out trader/ibkr` e rode `$J simulate --date <ontem> --bars trader/ibkr`. Depois, `$J lessons`.
+- **Radar**, antes de escolher: `$J lessons`. Aplique as **Regras aprovadas**; as **Observações** são só contexto. Se houver posição aberta de outro dia, diga isso primeiro. Depois do resumo, registre **cada** plano mostrado: `$J plan --symbol X --entry E --stop S --target T --shares N --time <hora do post ET> --signal-time <hora do rompimento> --risk PASS|FAIL --tm-mean-r <R médio> --data ibkr`.
+- **Thread de ordem** ("quero operar X"): registre o plano refeito com `$J plan`, a resposta do Cristian com `$J decide` (`operado` depois do "sim"; `recusado` ou `nao_confirmado` se não), e marque a linha do radar com `--superseded-by <id novo>`. Depois da execução, `$J ibkr-trades`.
+- **Zerar posições**: `get_account_trades` (`TODAY`) → `$J ibkr-trades`, e diga quais linhas seguem abertas.
+- **Revisão semanal** (sexta depois do fechamento ou sábado): `$J review`, poste o relatório e pergunte ao Cristian sobre cada proposta, um "sim" por proposta. Uma regra só entra em `licoes.md` com `$J note --rule --approved-by "<quem, onde, quando>"` depois desse "sim"; se mexer num script ou no `trader/config.json`, vai por PR.
+- **Nunca** mude uma regra por conta própria nem por uma faixa marcada como "amostra insuficiente" (menos de `journal.min_sample` = 30 casos). Com pouca amostra, "aprender" é ajustar a estratégia ao acaso (overfitting). Lições de processo (um script que conta errado, um tipo de ordem que o conector não tem) podem ser registradas na hora como observação.
+- Se a pasta `/mnt/project-files` não existir na sessão, o script avisa e grava em `trader/diario`, que se perde: avise o Cristian.
+
 ## Arquivos gerados
 
 Sessões na nuvem são apagadas ao terminar. Quando uma skill gerar um arquivo que valha guardar (relatório, plano, contexto), salve-o dentro deste repositório e ofereça fazer commit.
 
 ## Mapa de pedidos
 
-Ordem do dia: `trader-scanner` → `trader-news` → `trader-entry` → `trader-exit` → `trader-timemachine` → `trader-budget` → `trader-risk` → `trader-broker`, com `trader-alerts` vigiando stop, alvo e horário.
+Ordem do dia: `trader-journal lessons` → `trader-scanner` → `trader-news` → `trader-entry` → `trader-exit` → `trader-timemachine` → `trader-budget` → `trader-risk` → `trader-broker`, com `trader-alerts` vigiando stop, alvo e horário, e `trader-journal` registrando cada plano, decisão e resultado.
 
 | Pedido em português | Skill |
 |---|---|
@@ -68,6 +80,7 @@ Ordem do dia: `trader-scanner` → `trader-news` → `trader-entry` → `trader-
 | "me avisa se bater o preço", "o mercado está aberto?", "cotação de X" | `trader-alerts` |
 | "como foi o balanço?", "o que mudou no trimestre?", "10-Q" | `trader-analyst` |
 | "o que a Pelosi comprou?", "trades do Congresso" | `trader-pelosi` |
+| "o que aprendemos?", "revisão semanal", "registra o trade", "como estão os resultados?", "estou melhorando?" | `trader-journal` |
 | "isso é estatisticamente significativo?", "é sorte ou é real?", "quantos trades preciso para saber?" | `statistical-analyst` |
 | "esses dados estão certos?", "tem buraco/outlier nas cotações?" | `data-quality-auditor` |
 
