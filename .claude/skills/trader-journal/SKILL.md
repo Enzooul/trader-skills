@@ -98,6 +98,14 @@ $J note --rule --approved-by "Cristian, thread X, 04/11" --text "..."   # only a
   the 15:50 bar. Commission `journal.commission_round_trip` (US$ 2, IBKR Pro
   Fixed). It reads `<SYM>.json` (the Yahoo v8 format `ibkr_chart.py bars`
   writes) and only the bars of `--date` in New York.
+- `plan --tag balanco` marks a plan on an earnings (or strong news) day; the
+  `balanco` bucket keeps those days apart from ordinary ones.
+- `review` also answers "does the time machine predict the result?": the
+  results of plans with time-machine mean R <= 0 against > 0, and the rank
+  correlation. Pre-registered on 2026-11-06: with `min_sample` results on each
+  side, if the R > 0 side is not better with p < 0.05, the review proposes
+  taking the time machine out of the "R medio > 0" rule. Before that it only
+  counts how many cases are missing.
 - **R** is the result in multiples of the planned risk, before commission:
   +1 R won what it risked, -1 R hit the stop. It compares trades of any size.
   The dollar net shows what the commission did.

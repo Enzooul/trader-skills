@@ -272,6 +272,13 @@ def bucket(r, dim):
         return ["1) seg", "2) ter", "3) qua", "4) qui", "5) sex", "6) sab", "7) dom"][parse_date(r["date"]).weekday()]
     if dim == "setup":
         return r.get("setup") or "?"
+    if dim == "maquina_tempo":
+        tm = r.get("tm_mean_R")
+        if tm is None:
+            return "?"
+        return "1) R medio <= 0" if tm <= 0 else "2) R medio > 0"
+    if dim == "balanco":
+        return "1) balanco/noticia" if "balanco" in (r.get("tags") or []) else "2) dia comum"
     if dim == "decisao":
         return (r.get("decision") or {}).get("status", "planejado")
     if dim == "fonte":
@@ -279,9 +286,11 @@ def bucket(r, dim):
     raise JournalError("unknown dimension %s" % dim)
 
 
-DIMS = ("hora", "risco_acao", "rr_plano", "preco", "atraso", "dia_semana", "setup", "decisao", "fonte")
-# The dimensions a rule change can be proposed on (decisao and fonte only describe the journal).
-RULE_DIMS = ("hora", "risco_acao", "rr_plano", "preco", "atraso", "dia_semana", "setup")
+DIMS = ("hora", "risco_acao", "rr_plano", "preco", "atraso", "dia_semana", "setup", "balanco", "maquina_tempo",
+        "decisao", "fonte")
+# The dimensions a rule change can be proposed on (decisao and fonte only describe the journal;
+# maquina_tempo has its own pre-registered test in calibration()).
+RULE_DIMS = ("hora", "risco_acao", "rr_plano", "preco", "atraso", "dia_semana", "setup", "balanco")
 
 
 # ---------------------------------------------------------------- statistics (no numpy)
@@ -337,6 +346,80 @@ def welch_p(a, b):
     if se == 0:
         return None
     return 2 * norm_sf(abs(ma - mb) / se)
+
+
+def spearman(pairs):
+    """Rank correlation of (x, y) pairs, ties averaged."""
+    n = len(pairs)
+    if n < 3:
+        return None
+
+    def ranks(v):
+        order = sorted(range(n), key=lambda i: v[i])
+        out = [0.0] * n
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                out[order[k]] = (i + j) / 2.0 + 1
+            i = j + 1
+        return out
+    rx, ry = ranks([p[0] for p in pairs]), ranks([p[1] for p in pairs])
+    mx, my = sum(rx) / n, sum(ry) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    den = math.sqrt(sum((a - mx) ** 2 for a in rx) * sum((b - my) ** 2 for b in ry))
+    return num / den if den else None
+
+
+def calibration(rows, min_sample):
+    """Does the time machine's mean R predict the result? Pre-registered 2026-11-06 (the rule
+    "only trade with tm mean R > 0" was approved 2026-11-05 on 8 cases):
+    with >= min_sample results on EACH side, the rule keeps the time machine only if the
+    R > 0 side is better with p < 0.05; otherwise the review proposes dropping the time
+    machine from the rule (the rule then only means fewer trades)."""
+    pairs = []
+    for r in rows:
+        res = result_of(r)
+        if res is None or r.get("tm_mean_R") is None:
+            continue
+        pairs.append((float(r["tm_mean_R"]), float(res["R"])))
+    neg = [y for x, y in pairs if x <= 0]
+    pos = [y for x, y in pairs if x > 0]
+    out = dict(n=len(pairs), neg=mean_ci(neg), pos=mean_ci(pos), rho=spearman(pairs), p=None, verdict="amostra")
+    if len(neg) >= min_sample and len(pos) >= min_sample:
+        out["p"] = welch_p(pos, neg)
+        better = sum(pos) / len(pos) > sum(neg) / len(neg)
+        out["verdict"] = "preve" if (better and out["p"] is not None and out["p"] < 0.05) else "nao_preve"
+    return out
+
+
+def calibration_lines(cal, min_sample):
+    def side(m, label):
+        if not m:
+            return "%s: 0 casos" % label
+        ci = ("IC95 %s a %s" % (fnum(m["lo"]), fnum(m["hi"]))) if m.get("lo") is not None else "IC95 -"
+        return "%s: %d casos, media %s R (%s)" % (label, m["n"], fnum(m["mean"]), ci)
+    L = ["- %s" % side(cal["neg"], "R medio da maquina do tempo <= 0"),
+         "- %s" % side(cal["pos"], "R medio > 0")]
+    if cal["rho"] is not None:
+        L.append("- Correlacao de postos (Spearman) entre o R medio previsto e o R obtido: %s (0 = nenhuma relacao, "
+                 "1 = ordem perfeita), em %d planos." % (fnum(cal["rho"]), cal["n"]))
+    nn = (cal["neg"] or {}).get("n", 0)
+    pn = (cal["pos"] or {}).get("n", 0)
+    if cal["verdict"] == "amostra":
+        L.append("- **Ainda sem conclusao:** o criterio combinado pede %d casos de cada lado (faltam %d com R <= 0 e %d "
+                 "com R > 0). A regra aprovada em 05/11 continua valendo enquanto isso." % (
+                     min_sample, max(0, min_sample - nn), max(0, min_sample - pn)))
+    elif cal["verdict"] == "preve":
+        L.append("- **A maquina do tempo separa os planos** (p %.3f): a regra \"so operar com R medio > 0\" "
+                 "tem base nos dados." % cal["p"])
+    else:
+        L.append("- **A maquina do tempo NAO separa os planos** (p %s): pelo criterio combinado em 06/11, propor ao "
+                 "Cristian tirar a maquina do tempo da regra (a regra so estaria reduzindo trades ao acaso)." % (
+                     ("%.3f" % cal["p"]) if cal["p"] is not None else "-"))
+    return L
 
 
 def group_stats(rows, dim):
@@ -912,6 +995,10 @@ def cmd_review(a):
             L.append("| %s | %d%s | %s | %s a %s | %d%% | %s |" % (
                 g["key"], g["n"], "" if g["n"] >= st["min_sample"] else " (pouco)", fnum(g["mean"]), fnum(g["lo"]),
                 fnum(g["hi"]), round(100 * g["wins"] / g["n"]), fusd(g["net"])))
+    L.append("")
+    L.append("## A maquina do tempo preve o resultado?")
+    L.append("")
+    L.extend(calibration_lines(calibration(rows, st["min_sample"]), st["min_sample"]))
     L.append("")
     L.append("## Propostas de mudanca de regra")
     L.append("")

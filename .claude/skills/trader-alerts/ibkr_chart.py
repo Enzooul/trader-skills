@@ -10,6 +10,8 @@ so Claude reads IBKR with the connector and passes the numbers here:
          (trader-timemachine).
   price  one IBKR quote -> trader/prices.json (trader-budget, trader-risk),
          merged with what is already there.
+  screener an IBKR preview_screener answer -> trader/ibkr-screener.txt (a ticker
+         list for scan.py orb --watchlist) and .json (with contract ids).
   account  the IBKR balance (get_account_summary) and open positions
          (get_account_positions) -> trader/account.json. With
          "budget_source": "ibkr" in trader/config.json, trader-budget and
@@ -381,6 +383,35 @@ def _fmt(x):
     return str(int(x)) if float(x) == int(x) else "%.4f" % x
 
 
+def cmd_screener(a):
+    """Raw preview_screener / run_saved_screener answer -> a ticker list for scan.py
+    (--watchlist FILE.txt) and a JSON with the IBKR contract ids (no search_contracts
+    needed later). Seen 2026-11-06: {"results":[{"rank":1,"contract_id":445419999,
+    "company_name":"JFROG LTD","contract_description":"FROG"}],"total_matched":293};
+    the answer carries no prices or percentages, only the ranked names."""
+    doc = _load(a.inp, "preview_screener")
+    rows = (doc.get("results") if isinstance(doc, dict) else doc) or []
+    hits = []
+    for r in rows:
+        sym = str(r.get("contract_description") or r.get("symbol") or "").upper().strip()
+        if not sym or " " in sym:
+            continue
+        hits.append({"symbol": sym, "contract_id": r.get("contract_id"), "rank": r.get("rank"),
+                     "name": r.get("company_name")})
+    if not hits:
+        raise IBKRError("the screener answer has no results")
+    hits.sort(key=lambda h: (h["rank"] is None, h["rank"]))
+    now = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    out = {"as_of": now, "source": "ibkr preview_screener", "filters": a.label or "",
+           "total_matched": doc.get("total_matched") if isinstance(doc, dict) else None, "hits": hits}
+    _write(a.out, out)
+    txt = os.path.splitext(a.out)[0] + ".txt"
+    with open(txt, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(h["symbol"] for h in hits) + "\n")
+    print("IBKR screener: %d of %s matches -> %s and %s (scan.py orb --watchlist %s)" % (
+        len(hits), out["total_matched"] if out["total_matched"] is not None else "?", a.out, txt, txt))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Hand IBKR connector data to the trader-* scripts.")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -404,9 +435,13 @@ def main(argv=None):
     c.add_argument("--orders", help="raw get_account_orders answer: checks every open position has a stop")
     c.add_argument("--trades", help="raw get_account_trades answer (period DAYS_7): today's entries and realized P&L")
     c.add_argument("--write", default="trader/account.json")
+    r = sub.add_parser("screener", help="IBKR preview_screener answer -> ticker list for scan.py orb")
+    r.add_argument("--in", dest="inp", required=True, help="the preview_screener answer saved as-is")
+    r.add_argument("--out", default="trader/ibkr-screener.json")
+    r.add_argument("--label", help="a short note of the filters used")
     a = ap.parse_args(argv)
     try:
-        {"bars": cmd_bars, "price": cmd_price, "account": cmd_account}[a.cmd](a)
+        {"bars": cmd_bars, "price": cmd_price, "account": cmd_account, "screener": cmd_screener}[a.cmd](a)
     except IBKRError as e:
         print("ERROR: %s" % e, file=sys.stderr)
         return 2
