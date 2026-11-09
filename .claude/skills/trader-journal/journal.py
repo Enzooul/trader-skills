@@ -31,6 +31,7 @@ Standard library only. Nothing here talks to the network or to the broker.
 
 import argparse
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -231,6 +232,67 @@ def plan_rr(p):
         return None
 
 
+def rules_version(d):
+    """A short, stable name for the approved rules in force: how many, the date of the newest one and a
+    fingerprint of the whole section, so a label says which rule set produced it."""
+    with open(lessons_path(d), encoding="utf-8") as fh:
+        body = _section(fh.read(), "## Regras aprovadas")
+    rules = [l for l in body.splitlines() if l.startswith("- ")]
+    dates = re.findall(r"^- \*\*(\d{4}-\d{2}-\d{2})\*\*", body, re.M)
+    fp = hashlib.sha256(body.strip().encode("utf-8")).hexdigest()[:8]
+    return "%d regras ate %s (%s)" % (len(rules), max(dates) if dates else "-", fp)
+
+
+def label_hash(label):
+    """Fingerprint of a frozen label: any later edit of the label (or of the plan it froze) shows up."""
+    core = {k: v for k, v in label.items() if k != "hash"}
+    return hashlib.sha256(json.dumps(core, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def label_ok(r):
+    lab = r.get("label")
+    return None if not lab else lab.get("hash") == label_hash(lab)
+
+
+def _et_hm(utc_text):
+    try:
+        return to_eastern(parse_utc(utc_text)).strftime("%H:%M")
+    except (JournalError, TypeError, ValueError):
+        return None
+
+
+def _decided_hm(r):
+    """The New York time of the 'sim', only when it was recorded that day before the fill (rows filled in later
+    by a backfill or by ibkr-trades carry the time of the import, which says nothing about the delay)."""
+    dec = r.get("decision") or {}
+    if dec.get("auto") or r.get("off_system") or not dec.get("at"):
+        return None
+    try:
+        et = to_eastern(parse_utc(dec["at"]))
+    except (JournalError, TypeError, ValueError):
+        return None
+    entry = (r.get("real") or {}).get("entry_time")
+    if et.date().isoformat() != r.get("date") or (entry and et.hour * 60 + et.minute > hm(entry)):
+        return None
+    return et.strftime("%H:%M")
+
+
+def execution_of(r):
+    """Slippage and delays of a real trade, from what the journal already holds (no new data)."""
+    real, p = r.get("real") or {}, r.get("plan") or {}
+    if not real.get("entry_price") or not p.get("entry"):
+        return {"entry": real.get("entry_time")}
+    risk = p["entry"] - p["stop"] if p.get("stop") is not None else None
+    slip = round(real["entry_price"] - p["entry"], 4)
+    out = {"slip": slip, "slip_R": round(slip / risk, 3) if risk and risk > 0 else None,
+           "signal": r.get("signal_time"), "seen": r.get("first_seen"),
+           "decided": _decided_hm(r),
+           "entry": real.get("entry_time")}
+    for k, a, b in (("lag_signal_entry", "signal", "entry"), ("lag_seen_entry", "seen", "entry")):
+        out[k] = hm(out[b]) - hm(out[a]) if out[a] and out[b] else None
+    return out
+
+
 def result_of(r):
     """The outcome the learning uses: the real trade when closed, else the simulation. A row replaced
     by a re-made plan of the same breakout (superseded_by) counts once, through the new row."""
@@ -283,12 +345,19 @@ def bucket(r, dim):
         return (r.get("decision") or {}).get("status", "planejado")
     if dim == "fonte":
         return r.get("source") or "?"
+    if dim == "recomendacao":
+        lab = (r.get("label") or {}).get("recomendado")
+        return "1) recomendado" if lab == "sim" else "2) nao recomendado" if lab == "nao" else "?"
+    if dim == "execucao":
+        if not r.get("real"):
+            return "3) nao operado"
+        return "2) fora do sistema" if r.get("off_system") else "1) pelo sistema"
     raise JournalError("unknown dimension %s" % dim)
 
 
 DIMS = ("hora", "risco_acao", "rr_plano", "preco", "atraso", "dia_semana", "setup", "balanco", "maquina_tempo",
-        "decisao", "fonte")
-# The dimensions a rule change can be proposed on (decisao and fonte only describe the journal;
+        "decisao", "fonte", "recomendacao", "execucao")
+# The dimensions a rule change can be proposed on (decisao, fonte, recomendacao and execucao only describe the journal;
 # maquina_tempo has its own pre-registered test in calibration()).
 RULE_DIMS = ("hora", "risco_acao", "rr_plano", "preco", "atraso", "dia_semana", "setup", "balanco")
 
@@ -498,13 +567,30 @@ def cmd_plan(a):
         r["tags"] = sorted(set((r.get("tags") or []) + a.tag))
     if a.notes:
         r["notes"] = a.notes
+    frozen = ""
+    if a.recomendado:
+        old = r.get("label")
+        if old:
+            if old.get("recomendado") != a.recomendado:
+                frozen = ("  (etiqueta congelada mantida: '%s' desde %s; para outra etiqueta registre um plano novo)"
+                          % (old.get("recomendado"), old.get("seen")))
+        else:
+            if not a.motivo:
+                raise JournalError("--recomendado needs --motivo (which rule decided it)")
+            lab = {"recomendado": a.recomendado, "motivo": a.motivo, "rules": rules_version(d), "at": stamp(),
+                   "seen": seen, "id": r["id"], "date": date, "symbol": sym, "signal_time": r.get("signal_time"),
+                   "plan": {k: r["plan"][k] for k in ("entry", "stop", "target", "shares")},
+                   "tm_mean_R": r.get("tm_mean_R"), "risk_pass": r.get("risk_pass")}
+            lab["hash"] = label_hash(lab)
+            r["label"] = lab
+            frozen = "  etiqueta: %s (%s)" % ("RECOMENDADO" if a.recomendado == "sim" else "nao recomendado", a.motivo)
     save_rows(d, rows)
     rs = r["plan"]["risk_per_share"]
     warn = ""
     if rs < settings()["min_risk_per_share"]:
         warn = "  (risco/acao %.2f < %.2f: a comissao come o ganho)" % (rs, settings()["min_risk_per_share"])
     print("%s %s: %s %s entrada %.2f stop %.2f alvo %.2f, R:R %s, visto %s%s" % (
-        verb, r["id"], date, sym, a.entry, a.stop, a.target, r["plan"]["rr"], ", ".join(r["seen_at"]), warn))
+        verb, r["id"], date, sym, a.entry, a.stop, a.target, r["plan"]["rr"], ", ".join(r["seen_at"]), warn + frozen))
 
 
 def cmd_decide(a):
@@ -515,8 +601,16 @@ def cmd_decide(a):
     if a.superseded_by:
         find(rows, a.superseded_by)
         r["superseded_by"] = a.superseded_by
+    lab = r.get("label") or {}
+    note = ""
+    if a.status == "operado" and (lab.get("recomendado") == "nao" or a.excecao):
+        r["exception"] = {"motivo": a.excecao or "sem motivo informado", "at": stamp()}
+        note = "  EXCECAO: operado %s (%s)" % (
+            "sendo NAO recomendado" if lab.get("recomendado") == "nao" else "fora da regra", r["exception"]["motivo"])
+        if not a.excecao:
+            note += " -- passe --excecao \"<motivo>\" para registrar o porque"
     save_rows(d, rows)
-    print("%s: %s (%s)" % (r["id"], a.status, a.reason or "sem motivo"))
+    print("%s: %s (%s)%s" % (r["id"], a.status, a.reason or "sem motivo", note))
 
 
 def _fills_of(doc):
@@ -606,23 +700,27 @@ def cmd_ibkr_trades(a):
             pick.sort(key=lambda r: ((r.get("decision") or {}).get("status") != "operado", -hm(r["first_seen"])))
             if pick:
                 r = pick[0]
+                if (r.get("decision") or {}).get("status") != "operado":
+                    r["off_system"] = True      # no "sim" was recorded on any plan: bought straight in the app
             else:
                 r = {"id": new_id(rows, day, sym), "date": day, "symbol": sym, "first_seen": et.strftime("%H:%M"),
                      "seen_at": [et.strftime("%H:%M")], "source": "manual", "setup": "?", "created": stamp(),
-                     "notes": "compra na IBKR sem plano registrado no diario"}
+                     "notes": "compra na IBKR sem plano registrado no diario", "off_system": True}
                 rows.append(r)
                 created.append(r["id"])
         else:
             r = {"id": new_id(rows, day, sym), "date": day, "symbol": sym, "first_seen": et.strftime("%H:%M"),
                  "seen_at": [et.strftime("%H:%M")], "source": "manual", "setup": "?", "created": stamp(),
-                 "notes": "venda na IBKR sem compra no diario (a compra ficou fora da janela importada?)"}
+                 "notes": "venda na IBKR sem compra no diario (a compra ficou fora da janela importada?)",
+                 "off_system": True}
             rows.append(r)
             created.append(r["id"])
         r.setdefault("real", {"fills": []})
         r["real"]["fills"].append(f)
         r["real"]["source"] = "ibkr get_account_trades"
-        r["decision"] = dict(r.get("decision") or {}, status="operado")
-        r["decision"].setdefault("at", stamp())
+        if (r.get("decision") or {}).get("status") != "operado":
+            r["decision"] = {"status": "operado", "at": stamp(), "auto": True,
+                             "reason": "compra vista na IBKR, sem 'sim' registrado antes"}
         _recompute(r)
         known.add(f["trade_id"])
         if r["id"] not in touched:
@@ -630,6 +728,10 @@ def cmd_ibkr_trades(a):
     save_rows(d, rows)
     print("IBKR: %d fills already in the journal, %d rows updated%s." % (
         skipped, len(touched), (", %d new rows without a plan (%s)" % (len(created), ", ".join(created))) if created else ""))
+    off = [rid for rid in touched if find(rows, rid).get("off_system")]
+    if off:
+        print("FORA DO SISTEMA: %s. Compra feita direto no app, sem o 'sim' registrado num plano (nao passou pelo "
+              "trader-risk). Diga isso na primeira linha da mensagem." % ", ".join(off))
     for rid in touched:
         r = find(rows, rid)
         real = r["real"]
@@ -1000,6 +1102,10 @@ def cmd_review(a):
     L.append("")
     L.extend(calibration_lines(calibration(rows, st["min_sample"]), st["min_sample"]))
     L.append("")
+    L.extend(label_lines(rows, st["min_sample"]))
+    L.append("")
+    L.extend(execution_lines(rows))
+    L.append("")
     L.append("## Propostas de mudanca de regra")
     L.append("")
     props, k = proposals(rows, st["min_sample"])
@@ -1039,6 +1145,95 @@ def cmd_review(a):
     print("-> %s" % path)
 
 
+def label_lines(rows, min_sample):
+    """Recommended vs not, only on labels frozen when the plan was shown (never set after the outcome)."""
+    L = ["## Recomendado x nao recomendado (etiqueta congelada)", ""]
+    lab = [r for r in rows if r.get("label")]
+    if not lab:
+        L.append("Ainda nenhum plano com etiqueta congelada (`plan --recomendado sim|nao --motivo`). "
+                 "As etiquetas de antes nao contam: foram dadas sem registro no momento do aviso.")
+        return L
+    bad = [r["id"] for r in lab if not label_ok(r)]
+    first = min(r["date"] for r in lab)
+    L.append("Etiquetas desde %s: %d. Comparar so com estas evita escolher o filtro depois de ver o resultado." % (first, len(lab)))
+    if bad:
+        L.append("**%d etiqueta(s) mudaram depois de gravadas (impressao digital nao confere): %s.** Elas ficam fora da comparacao."
+                 % (len(bad), ", ".join(bad)))
+    ok = [r for r in lab if label_ok(r)]
+    L.append("")
+    L.append("| Grupo | n | Media R | IC95 | Acerto | Liquido |")
+    L.append("|---|---|---|---|---|---|")
+    groups = group_stats(ok, "recomendacao")
+    if not groups:
+        L.append("| (nenhuma etiqueta valida com resultado ainda) | - | - | - | - | - |")
+    allg = group_stats(ok, "setup")
+    rs = [x for g in allg for x in g["rs"]]
+    for g in groups:
+        L.append("| %s | %d%s | %s | %s a %s | %d%% | %s |" % (
+            g["key"], g["n"], "" if g["n"] >= min_sample else " (pouco)", fnum(g["mean"]), fnum(g["lo"]), fnum(g["hi"]),
+            round(100 * g["wins"] / g["n"]), fusd(g["net"])))
+    if rs:
+        c = mean_ci(rs)
+        L.append("| todos os sinais | %d | %s | %s a %s | - | %s |" % (len(rs), fnum(c["mean"]), fnum(c["lo"]), fnum(c["hi"]),
+                                                                    fusd(sum(g["net"] for g in allg))))
+    exc = [r for r in rows if r.get("exception")]
+    if exc:
+        net = [r["real"]["net"] for r in exc if (r.get("real") or {}).get("status") == "fechado"]
+        L.append("")
+        L.append("Excecoes (operado contra a etiqueta): %d, fechadas %d, liquido %s. Motivos: %s." % (
+            len(exc), len(net), fusd(sum(net)) if net else "-",
+            "; ".join("%s %s" % (r["symbol"], r["exception"]["motivo"]) for r in exc[-5:])))
+    return L
+
+
+def execution_lines(rows):
+    """Every real trade: was it ordered through the system, how late, and how far from the plan's price."""
+    L = ["## Execucao dos trades reais (todo o historico)", ""]
+    real = [r for r in rows if (r.get("real") or {}).get("entry_price")]
+    if not real:
+        L.append("(nenhum trade real ainda)")
+        return L
+    L.append("Slippage = preco pago - entrada do plano (positivo = pagou mais caro); em R = sobre o risco por acao do plano. "
+             "Atraso = minutos do rompimento (ou do aviso) ate a compra.")
+    L.append("")
+    L.append("| Trade | Como | Rompimento | Aviso | Decisao | Compra | Atraso rompimento->compra | Plano | Pago | Slippage | Slippage em R | Resultado |")
+    L.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+    slips, lags = [], []
+    for r in real:
+        x, e = r["real"], execution_of(r) or {}
+        res = ("%s %s" % (x.get("outcome"), fusd(x.get("net")))) if x.get("status") == "fechado" else "aberto"
+        L.append("| %s %s | %s | %s | %s | %s | %s | %s | %s | %.2f | %s | %s | %s |" % (
+            r["date"], r["symbol"], "fora do sistema" if r.get("off_system") else "pelo sistema",
+            e.get("signal") or "-", e.get("seen") or "-", e.get("decided") or "-", e.get("entry") or "-",
+            ("%d min" % e["lag_signal_entry"]) if e.get("lag_signal_entry") is not None else "-",
+            ("%.2f" % r["plan"]["entry"]) if (r.get("plan") or {}).get("entry") else "-", x["entry_price"],
+            ("%+.2f" % e["slip"]).replace(".", ",") if e.get("slip") is not None else "-",
+            fnum(e.get("slip_R")), res))
+        if e.get("slip_R") is not None:
+            slips.append(e["slip_R"])
+        if e.get("lag_signal_entry") is not None:
+            lags.append(e["lag_signal_entry"])
+    L.append("")
+    off = [r for r in real if r.get("off_system")]
+    L.append("- Trades reais: %d; fora do sistema (comprados no app sem 'sim' registrado): %d." % (len(real), len(off)))
+    if slips:
+        L.append("- Slippage medio: %s R por trade (%d trades)." % (fnum(sum(slips) / len(slips), 3), len(slips)))
+    if lags:
+        L.append("- Atraso medio do rompimento ate a compra: %d min (mediana %d)." % (
+            round(sum(lags) / len(lags)), sorted(lags)[len(lags) // 2]))
+    return L
+
+
+def cmd_verify(a):
+    d = journal_dir(a.dir)
+    rows = load_rows(d)
+    lab = [r for r in rows if r.get("label")]
+    bad = [r["id"] for r in lab if not label_ok(r)]
+    print("%d etiquetas congeladas; %d conferem; %d mudaram depois de gravadas%s" % (
+        len(lab), len(lab) - len(bad), len(bad), (": " + ", ".join(bad)) if bad else "."))
+    return 1 if bad else 0
+
+
 def cmd_show(a):
     d = journal_dir(a.dir)
     rows = load_rows(d)
@@ -1061,6 +1256,13 @@ def cmd_show(a):
             ("nao entraria: %s" % sim["skip"]) if sim.get("skip") else
             ("ABERTO" if (r.get("real") or {}).get("status") == "aberto" else "-")))
     print("%d linhas" % len(rows))
+    lab = [r for r in rows if r.get("label")]
+    off = [r["id"] for r in rows if r.get("off_system")]
+    if lab:
+        print("etiquetas: %d recomendados, %d nao recomendados" % (
+            sum(1 for r in lab if r["label"]["recomendado"] == "sim"), sum(1 for r in lab if r["label"]["recomendado"] == "nao")))
+    if off:
+        print("fora do sistema: %s" % ", ".join(off))
 
 
 def main(argv=None):
@@ -1087,6 +1289,9 @@ def main(argv=None):
     p.add_argument("--data", choices=("ibkr", "yahoo"), help="where the bars came from")
     p.add_argument("--tag", action="append", help="free tag, repeatable (earnings, gap, spy-down...)")
     p.add_argument("--notes")
+    p.add_argument("--recomendado", choices=("sim", "nao"),
+                   help="the label the routine gave when it SHOWED the plan; frozen at the first write")
+    p.add_argument("--motivo", help="why (which approved rule decided the label)")
     p.set_defaults(func=cmd_plan)
 
     p = sub.add_parser("decide", help="record the decision on a plan")
@@ -1096,6 +1301,7 @@ def main(argv=None):
     p.add_argument("--status", required=True, choices=STATUSES)
     p.add_argument("--reason")
     p.add_argument("--superseded-by", help="id of the re-made plan of the same breakout (this row stops counting)")
+    p.add_argument("--excecao", help="why it was operated against its label (asked of Cristian before the order)")
     p.set_defaults(func=cmd_decide)
 
     p = sub.add_parser("ibkr-trades", help="import a raw get_account_trades answer")
@@ -1130,6 +1336,9 @@ def main(argv=None):
     p.add_argument("--week", help="ISO week like 2026-W45 (default: this week from Friday on, else the last one)")
     p.set_defaults(func=cmd_review)
 
+    p = sub.add_parser("verify", help="check that no frozen label was edited after it was written")
+    p.set_defaults(func=cmd_verify)
+
     p = sub.add_parser("show", help="list rows")
     p.add_argument("--date")
     p.add_argument("--days", type=int, default=7)
@@ -1138,11 +1347,11 @@ def main(argv=None):
 
     a = ap.parse_args(argv)
     try:
-        a.func(a)
+        rc = a.func(a)
     except JournalError as e:
         print("journal: %s" % e, file=sys.stderr)
         return 2
-    return 0
+    return rc or 0
 
 
 if __name__ == "__main__":

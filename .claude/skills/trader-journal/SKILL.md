@@ -70,8 +70,11 @@ the session ends.
 J="python3 ${CLAUDE_SKILL_DIR}/journal.py"
 $J lessons                                   # the briefing, before any decision
 $J plan --symbol AAPL --entry 230.10 --stop 229.40 --target 231.50 --shares 4 \
-        --time 10:25 --signal-time 10:15 --risk PASS --tm-mean-r 0.05 --data ibkr
+        --time 10:25 --signal-time 10:15 --risk PASS --tm-mean-r 0.05 --data ibkr \
+        --recomendado nao --motivo "R medio <= 0"
 $J decide --date 2026-11-04 --symbol AAPL --status recusado --reason "comissao come o ganho"
+$J decide --id 2026-11-04-AAPL-2 --status operado --reason "Cristian: sim" --excecao "quis assim mesmo"
+$J verify                                    # no frozen label was edited after it was written
 $J ibkr-trades --in trader/ibkr/trades.json  # raw get_account_trades answer, saved as-is
 $J simulate --date 2026-11-04 --bars trader/ibkr   # after the close, bars from ibkr_chart.py bars
 $J review                                    # this week from Friday on, else last week
@@ -98,6 +101,25 @@ $J note --rule --approved-by "Cristian, thread X, 04/11" --text "..."   # only a
   the 15:50 bar. Commission `journal.commission_round_trip` (US$ 2, IBKR Pro
   Fixed). It reads `<SYM>.json` (the Yahoo v8 format `ibkr_chart.py bars`
   writes) and only the bars of `--date` in New York.
+- `plan --recomendado sim|nao --motivo "<regra>"` freezes the label the
+  routine gave when it SHOWED the plan: the label, the reason, the approved
+  rule set in force (`rules`: count, newest date and a fingerprint of the
+  "Regras aprovadas" section), the plan and the time, with a hash. A later
+  `plan` on the same row never changes it (a new label needs a new plan row),
+  and `verify` / `review` list any label whose hash no longer matches. Only
+  frozen labels enter the review's "recomendado x nao recomendado" table, so
+  the filter is judged on what was said before the outcome was known.
+- `decide --status operado` on a plan labelled `nao` records an `exception`
+  (`--excecao "<motivo>"`, asked of Cristian before the order). The review
+  shows the exceptions apart.
+- `ibkr-trades` marks a buy as `off_system` ("fora do sistema") when no
+  plan of that day and ticker had a recorded "sim" (`decide ... operado`)
+  before the import: it was bought straight in the app and never went
+  through trader-risk. The command prints `FORA DO SISTEMA` for it: say it
+  first. Its decision gets `auto: true`.
+- `review` has a table of every real trade: through the system or not,
+  breakout / post / "sim" / fill times, the delay from breakout to fill, and
+  the slippage (price paid minus the plan's entry, in dollars and in R).
 - `plan --tag balanco` marks a plan on an earnings (or strong news) day; the
   `balanco` bucket keeps those days apart from ordinary ones.
 - `review` also answers "does the time machine predict the result?": the
@@ -138,11 +160,13 @@ trade is closed, else the simulation.
    position (a position from another day breaks the flat-by rule: say so first).
 2. **Radar** (before choosing): `lessons`. Apply the approved rules. Then, for
    every plan in the summary, `plan` with the post time, the breakout time,
-   the risk verdict and the time machine mean R.
+   the risk verdict, the time machine mean R and the label the summary gave
+   (`--recomendado sim|nao --motivo`).
 3. **Order thread** (when Cristian says "quero operar X"): `plan` for the
-   re-made plan, `decide` with his answer (`operado` after his "sim",
-   `recusado` or `nao_confirmado` otherwise), `--superseded-by` on the radar
-   row. After the fill, `ibkr-trades`.
+   re-made plan (with its own frozen label), `decide` with his answer
+   (`operado` after his "sim", with `--excecao "<motivo>"` when the plan is
+   not recommended; `recusado` or `nao_confirmado` otherwise),
+   `--superseded-by` on the radar row. After the fill, `ibkr-trades`.
 4. **Zerar posicoes**: import today's IBKR trades and say which journal rows
    are still open.
 5. **Weekly review** (Friday after the close, or Saturday): `review`, post the
