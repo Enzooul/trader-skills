@@ -35,6 +35,7 @@ import hashlib
 import json
 import math
 import os
+import random
 import re
 import sys
 
@@ -560,7 +561,8 @@ def cmd_plan(a):
     r["plan"]["rr"] = plan_rr(r["plan"])
     r["plan"]["risk_per_share"] = round(a.entry - a.stop, 4)
     for key, val in (("risk_pass", a.risk), ("tm_mean_R", a.tm_mean_r), ("tm_p_target", a.tm_p_target),
-                     ("tm_p_stop", a.tm_p_stop), ("data", a.data), ("balance", a.balance)):
+                     ("tm_p_stop", a.tm_p_stop), ("data", a.data), ("balance", a.balance),
+                     ("contract_id", a.contract_id)):
         if val is not None:
             r[key] = val
     if a.tag:
@@ -828,11 +830,12 @@ def cmd_simulate(a):
     if not todo:
         print("Nada a simular em %s (sem planos, ou ja simulados: use --redo)." % a.date)
         return
-    done = 0
+    done, missing = 0, {}
     for r in todo:
         path = os.path.join(a.bars, "%s.json" % r["symbol"].replace(".", "-"))
         if not os.path.exists(path):
             print("  %s: sem barras em %s" % (r["id"], path))
+            missing.setdefault(r["symbol"], r.get("contract_id"))
             continue
         bars, src = _load_bars(path, day)
         if not bars:
@@ -851,6 +854,12 @@ def cmd_simulate(a):
                 fnum(res["R"]), (", liquido %s com %d acoes" % (fusd(res["net"]), r["plan"]["shares"])) if "net" in res else ""))
     save_rows(d, rows)
     print("Simulados %d de %d planos de %s (barras: %s). Resultado simulado, nao real." % (done, len(todo), a.date, a.bars))
+    if missing:
+        known = ["%s=%s" % (k, v) for k, v in sorted(missing.items()) if v]
+        unknown = sorted(k for k, v in missing.items() if not v)
+        print("Faltam barras de %d acoes. Contratos ja no diario (get_price_history direto, sem search_contracts): %s%s" % (
+            len(missing), ", ".join(known) or "nenhum",
+            ("; sem contrato registrado (precisa search_contracts): %s" % ", ".join(unknown)) if unknown else ""))
 
 
 def cmd_note(a):
@@ -1104,6 +1113,10 @@ def cmd_review(a):
     L.append("")
     L.extend(label_lines(rows, st["min_sample"]))
     L.append("")
+    L.extend(gate_lines(rows, st["commission_round_trip"]))
+    L.append("")
+    L.extend(robustness_lines(rows, st["commission_round_trip"], st["min_sample"]))
+    L.append("")
     L.extend(execution_lines(rows))
     L.append("")
     L.append("## Propostas de mudanca de regra")
@@ -1224,6 +1237,98 @@ def execution_lines(rows):
     return L
 
 
+def robustness(rows, commission, iters=2000):
+    """The falsification checks of the 09/11 audit, on dollar nets (commission already in):
+    a confidence interval that resamples whole DAYS (trades of one day move together, so they are
+    not independent), the result without the best trade, with the cost doubled, and how much of the
+    profit sits in the top 3 trades. Seeded, so the same journal always prints the same numbers."""
+    items = []
+    for r in rows:
+        res = result_of(r)
+        if res and res.get("net") is not None:
+            items.append((r["date"], res["net"]))
+    if not items:
+        return None
+    nets = [n for _, n in items]
+    days = {}
+    for d, n in items:
+        days.setdefault(d, []).append(n)
+    keys = sorted(days)
+    rng = random.Random(20261109)
+    boots = []
+    for _ in range(iters if len(keys) > 1 else 0):
+        pick = [days[keys[rng.randrange(len(keys))]] for _ in keys]
+        flat = [x for day in pick for x in day]
+        boots.append(sum(flat) / len(flat))
+    boots.sort()
+    lo = boots[int(0.025 * len(boots))] if boots else None
+    hi = boots[int(0.975 * len(boots)) - 1] if boots else None
+    total = sum(nets)
+    best = max(nets)
+    top3 = sum(sorted(nets, reverse=True)[:3])
+    return dict(n=len(nets), days=len(keys), total=total, mean=total / len(nets), lo=lo, hi=hi,
+                without_best=total - best, without_best_mean=(total - best) / (len(nets) - 1) if len(nets) > 1 else None,
+                cost2x=total - commission * len(nets), top3=top3, best=best)
+
+
+def robustness_lines(rows, commission, min_sample):
+    L = ["## Testes de robustez (todo o historico, liquido em US$ ja com comissao)", "",
+         "Quatro perguntas que separam vantagem de sorte: o intervalo de confianca reamostra **dias inteiros** "
+         "(trades do mesmo dia andam juntos, entao nao contam como independentes); o resultado sobrevive sem o melhor "
+         "trade? sobrevive com o custo em dobro (comissao + slippage piores)? o lucro depende de 3 trades?", "",
+         "| Grupo | Trades | Dias | Liquido total | Por trade | IC95 por dias (por trade) | Sem o melhor trade | Custo em dobro | Top 3 trades |",
+         "|---|---|---|---|---|---|---|---|---|"]
+    groups = [("todos os sinais", rows)]
+    lab = [r for r in rows if r.get("label") and label_ok(r)]
+    if lab:
+        groups.append(("recomendados (etiqueta congelada)", [r for r in lab if r["label"]["recomendado"] == "sim"]))
+        groups.append(("nao recomendados (etiqueta congelada)", [r for r in lab if r["label"]["recomendado"] == "nao"]))
+    groups.append(("trades reais", [r for r in rows if (r.get("real") or {}).get("status") == "fechado"]))
+    for name, sub in groups:
+        x = robustness(sub, commission)
+        if not x:
+            L.append("| %s | 0 | - | - | - | - | - | - | - |" % name)
+            continue
+        L.append("| %s | %d%s | %d | %s | %s | %s a %s | %s | %s | %s |" % (
+            name, x["n"], "" if x["n"] >= min_sample else " (pouco)", x["days"], fusd(x["total"]), fusd(x["mean"]),
+            fusd(x["lo"]), fusd(x["hi"]), fusd(x["without_best"]), fusd(x["cost2x"]), fusd(x["top3"])))
+    L.append("")
+    L.append("Leitura: so existe vantagem se o IC95 por dias ficar todo acima de zero **e** o resultado continuar positivo "
+             "sem o melhor trade e com o custo em dobro. Com menos de %d trades, nenhuma linha prova nada." % min_sample)
+    return L
+
+
+GATE_N = 100   # frozen "recomendado" labels needed before calling the filter proven (proposed 2026-11-09, not a rule)
+
+
+def gate_lines(rows, commission):
+    """Has 'recomendado' earned its name? The criterion proposed on 2026-11-09, checked on frozen labels only."""
+    lab = [r for r in rows if r.get("label") and label_ok(r)]
+    rec = [r for r in lab if r["label"]["recomendado"] == "sim"]
+    non = [r for r in lab if r["label"]["recomendado"] == "nao"]
+    xr, xn, xa = robustness(rec, commission), robustness(non, commission), robustness(rows, commission)
+    ok = lambda b: "sim" if b else "ainda nao"
+    n_ok = bool(xr) and xr["n"] >= GATE_N
+    ci_ok = bool(xr) and xr["lo"] is not None and xr["lo"] > 0
+    rob_ok = bool(xr) and xr["without_best"] > 0 and xr["cost2x"] > 0
+    beat_ok = bool(xr) and bool(xn) and xa is not None and xr["mean"] > xn["mean"] and xr["mean"] > xa["mean"]
+    L = ["## O \"recomendado\" ja provou valor?", "",
+         "Criterio proposto em 09/11 (serve para medir, nao trava nenhuma entrada):", "",
+         "| Condicao | Agora | Cumprida? |", "|---|---|---|",
+         "| %d planos recomendados com etiqueta congelada e resultado | %d | %s |" % (GATE_N, xr["n"] if xr else 0, ok(n_ok)),
+         "| IC95 por dias do liquido por trade acima de zero | %s | %s |" % (
+             ("%s a %s" % (fusd(xr["lo"]), fusd(xr["hi"]))) if xr and xr["lo"] is not None else "-", ok(ci_ok)),
+         "| Positivo sem o melhor trade e com custo em dobro | %s / %s | %s |" % (
+             fusd(xr["without_best"]) if xr else "-", fusd(xr["cost2x"]) if xr else "-", ok(rob_ok)),
+         "| Melhor por trade que os nao recomendados e que todos os sinais | %s contra %s e %s | %s |" % (
+             fusd(xr["mean"]) if xr else "-", fusd(xn["mean"]) if xn else "-", fusd(xa["mean"]) if xa else "-", ok(beat_ok)),
+         ""]
+    L.append("Resultado: **%s**." % ("as quatro condicoes estao cumpridas: o filtro mostra vantagem" if
+                                     (n_ok and ci_ok and rob_ok and beat_ok) else
+                                     "ainda nao da para dizer que o recomendado ganha dinheiro"))
+    return L
+
+
 def cmd_verify(a):
     d = journal_dir(a.dir)
     rows = load_rows(d)
@@ -1289,6 +1394,7 @@ def main(argv=None):
     p.add_argument("--data", choices=("ibkr", "yahoo"), help="where the bars came from")
     p.add_argument("--tag", action="append", help="free tag, repeatable (earnings, gap, spy-down...)")
     p.add_argument("--notes")
+    p.add_argument("--contract-id", type=int, help="IBKR contract id (saves a search_contracts when simulating)")
     p.add_argument("--recomendado", choices=("sim", "nao"),
                    help="the label the routine gave when it SHOWED the plan; frozen at the first write")
     p.add_argument("--motivo", help="why (which approved rule decided the label)")

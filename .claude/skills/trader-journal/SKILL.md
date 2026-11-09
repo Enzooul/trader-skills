@@ -117,6 +117,17 @@ $J note --rule --approved-by "Cristian, thread X, 04/11" --text "..."   # only a
   before the import: it was bought straight in the app and never went
   through trader-risk. The command prints `FORA DO SISTEMA` for it: say it
   first. Its decision gets `auto: true`.
+- `plan --contract-id` keeps the IBKR contract; `simulate` then lists the
+  contracts of the plans whose bars are missing, so the Pre-market asks
+  `get_price_history` directly (no `search_contracts`, which the connector's
+  ~30 requests per minute made the bottleneck on 09/11).
+- `review` also prints the falsification checks of the 09/11 audit: a 95%
+  interval that resamples whole days, the result without the best trade,
+  with the cost doubled and the share of the top 3 trades, for all signals,
+  frozen-label recommended / not recommended and real trades; and whether
+  "recomendado" has met the proposed criterion (100 frozen labels, interval
+  above zero, survives the checks, beats the other groups). Both only
+  measure: nothing blocks a trade.
 - `review` has a table of every real trade: through the system or not,
   breakout / post / "sim" / fill times, the delay from breakout to fill, and
   the slippage (price paid minus the plan's entry, in dollars and in R).
