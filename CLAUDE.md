@@ -44,6 +44,12 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
 
 **Caixa preso:** se houver posição aberta e o caixa livre (depois da reserva) não comprar ações suficientes para um plano positivo no alvo depois da comissão, diga isso na primeira linha do Radar ("caixa livre US$ X: trades novos limitados") e mostre só os planos que ficam positivos no alvo.
 
+**Janela da estratégia** (aprovado pelo Cristian em 10/11/2026): o rompimento da faixa de abertura (ORB) só gera **plano novo** até `radar.orb_new_plans_until` (11:00 de Nova York) e só se o rompimento tiver no máximo `radar.orb_max_signal_age_min` (90) minutos. Rompimento mais velho é descartado no pré-filtro, nunca recalculado pelo preço atual. Depois das 11:00, o Radar fica em **modo vigia**: pré-voo, STOP GUARD, posições abertas e resultado do dia, sem scanner e sem plano novo (economiza o custo das sessões). Isso não muda os limites de risco: o `check.py` continua aceitando entradas até `no_entries_after`.
+
+**Comissão:** desde 10/11/2026 a conta usa o plano **Tiered** da IBKR (US$ 0,0035/ação, mínimo US$ 0,35 por ordem, mais taxas de bolsa, clearing e regulatórias). `journal.commission_round_trip` = 0,85 é uma **estimativa** (`commission_estimated: true`) para ordens de até ~100 ações. Use esse valor no "líquido no alvo" do Radar (não os US$ 2 do plano Fixed). Depois de 3 operações completas no Tiered, compare com as comissões reais do `get_account_trades` e proponha o valor medido por PR.
+
+**Alertas de rompimento** (aprovado pelo Cristian em 10/11/2026): a rotina "Alertas de rompimento" (9:46 NY) pode criar **alertas de preço** na IBKR (`create_alert`, `LAST` `GTE` na máxima da faixa de abertura, `tif` `UNTIL_DATE` = hoje, até 8 por dia). É a única exceção à regra abaixo: nunca ordens, nunca apagar ou mudar alertas que não criou. O alerta é só um aviso; qualquer ordem segue o caminho normal (Radar ou thread de ordem, `trader-risk` e o "sim").
+
 **Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
