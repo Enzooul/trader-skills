@@ -855,12 +855,18 @@ def run_plan(a, cfg):
     if order and a.write:
         src = "trader/plan.json (%s %s %s)" % (s["symbol"], s["setup"] or "plan", s["date"] or today)
         write_orders(a.write, [order], cfg, src, now)
+    elif a.write:
+        # no tradable size (0 shares): empty the file, so trader-risk never re-checks the
+        # previous ticker's order by mistake
+        write_orders(a.write, [], cfg, "trader/plan.json (%s: no order, 0 shares)" % (s.get("symbol") or sym), now)
     if a.json:
         print(json.dumps({"sizing": s, "orders": [order] if order else [], "notes": notes}, indent=2))
     else:
         print(plan_report(s, order, notes))
         if order and a.write:
             print("Wrote 1 proposed bracket order to %s" % a.write)
+        elif a.write:
+            print("No order: %s now holds no orders (trader-risk has nothing to check)" % a.write)
     return 0 if order else 1
 
 

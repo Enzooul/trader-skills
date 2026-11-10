@@ -160,7 +160,9 @@ is why the ticket, trader-risk and the user's word-for-word yes come first.
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT
    READY or BLOCKED goes back to `/trader-risk`.
 2. Show ONE ticket and ask: "Place this order? Reply yes or no." One order
-   per question. Never offer "yes to all".
+   per question. Never offer "yes to all". In Portuguese, "sim" (or "s")
+   counts like "yes", and "não", "espera", "mas", "talvez" or "todas" make it
+   a no, the same as their English words.
 3. Run `ticket.py approve --index N --reply "<the user's reply, word for word>"`.
    If it prints "Not recorded", the reply was not an explicit yes for this
    order (for example "sure", "yes to all", or a yes that names a different
@@ -172,6 +174,10 @@ is why the ticket, trader-risk and the user's word-for-word yes come first.
    response or `get_open_position`), or `--status denied`, or `--status failed`
    with `--note`. A failed order is not retried without a new check and a new yes.
    The log keeps the entry's max loss for trader-risk's daily limit.
+6. Journal it (trader-journal): `journal.py plan` for the plan as sent,
+   `journal.py decide --status operado` (or `recusado` / `nao_confirmado` when
+   no yes came), `--superseded-by` on the radar's row of the same breakout,
+   and after the fill `journal.py ibkr-trades --in <get_account_trades answer>`.
 
 ## Steps: while it is open, and out by the close
 

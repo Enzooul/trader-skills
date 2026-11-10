@@ -28,9 +28,10 @@ Tool in this folder (standard library Python, no keys):
 python3 "${CLAUDE_SKILL_DIR}/facts.py" --help
 ```
 
-It needs the SEC User-Agent (`sec_user_agent` in `trader/config.json`, or
-`SEC_USER_AGENT`): "Your Name you@example.com" with the user's real name and
-email. It refuses to call SEC without one.
+It needs the SEC User-Agent (`SEC_USER_AGENT` in the environment, or
+`sec_user_agent` in `trader/config.json`): "Your Name you@example.com" with the
+user's real name and email. It refuses to call SEC without one. This
+repository is public, so keep it in the environment, not in the config file.
 
 ## What it reads and writes
 

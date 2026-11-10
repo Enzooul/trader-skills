@@ -42,7 +42,7 @@ python3 "${CLAUDE_SKILL_DIR}/check.py" --now "2026-10-19 10:15"  # pin the clock
 | `trader/orders.json` | the proposed orders (trader-budget, or trader-broker's flatten) |
 | `trader/config.json` | the limits (trader-budget ships `config.example.json`) |
 | `trader/portfolio.json` | cash and holdings; if missing, a fresh account funded with the budget |
-| `trader/account.json` | with `"budget_source": "ibkr"`: the IBKR balance, cash and positions of today (`ibkr_chart.py account`); the budget and the dollar limits in `limits_pct` come from it, and it replaces `portfolio.json` |
+| `trader/account.json` | with `"budget_source": "ibkr"`: the IBKR balance, cash, positions, their broker stops (`--orders`) and today's IBKR trades (`--trades`), all of today (`ibkr_chart.py account`); the budget and the dollar limits in `limits_pct` come from it, and it replaces `portfolio.json`. Without today's trades it refuses |
 | `trader/prices.json` | a fresh price raises the entry it measures risk from; also values holdings |
 | `trader/state/broker.json` | what was placed today: duplicates, trades per day, daily loss, day trades |
 | `trader/state/risk.json` | the verdicts it writes, with a fingerprint of each exact order |
@@ -74,6 +74,7 @@ batch that is fine order by order but breaks a limit together is caught.
 | reward:risk | (entries) (target minus entry) / (entry minus stop) under `min_reward_risk` |
 | daily loss | (entries) the max losses at the stops of today's entries, plus this one, over `max_daily_loss_usd` |
 | trades | (entries) `max_trades_per_day` entries already placed today |
+| unprotected | (entries, IBKR) an open position without a working sell stop at the broker covering all its shares |
 | window | (entries) before `no_entries_before` or after `no_entries_after`, or the market is closed |
 | pdt | (entries, only with `pdt_guard` true) 3 day trades already in the last 5 business days |
 | duplicate | (entries) the same symbol and side twice in one batch, or already placed today |
@@ -88,6 +89,12 @@ How the numbers work:
   used, and it says so.
 - **Daily loss** counts the full max loss of every entry placed today, win or
   lose, as trader-broker logged it. Three full-size trades use up a $150 day.
+  With the IBKR account it takes the LARGER of that and what IBKR says
+  really happened: today's realized loss (`realized_pnl` of today's sells,
+  commissions included), the commission of buys still open, and what each
+  open position can still lose at its broker stop. Entries today are the
+  larger of the log and the distinct IBKR buy orders of the day. (Reading only
+  the log said $0 lost on a day with a real -$14.17 stop.)
 - **The window** is New York time, worked out in the tool (daylight saving
   included), never from the computer's clock zone. Weekends and NYSE holidays
   are closed. On a 1:00 p.m. early close the window ends 3 hours earlier too.
