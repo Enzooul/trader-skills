@@ -31,7 +31,14 @@
     "dir": "/mnt/project-files/diario",
     "min_sample": 30,
     "lookback_days": 20,
-    "commission_round_trip": 2.0,
-    "min_risk_per_share": 0.5
+    "commission_round_trip": 0.85,
+    "min_risk_per_share": 0.5,
+    "commission_plan": "tiered",
+    "commission_plan_since": "2026-11-10",
+    "commission_estimated": true
+  },
+  "radar": {
+    "orb_new_plans_until": "11:00",
+    "orb_max_signal_age_min": 90
   }
 }
