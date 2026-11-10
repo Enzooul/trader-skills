@@ -52,6 +52,8 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
 
 **Disjuntores** (aprovado pelo Cristian em 10/11/2026): o `check.py` bloqueia entradas novas depois de `max_consecutive_losses` (2) saídas com perda seguidas no dia e bloqueia o mesmo ativo por `loss_cooldown_min` (60) minutos depois de uma saída com perda. Conta pelas execuções da IBKR no `account.json`. Se o Radar mostrar `CIRCUIT BREAKER`, essa é a primeira linha da mensagem e nenhum plano novo sai até o dia seguinte.
 
+**Bilhete bracket** (aprovado pelo Cristian em 10/11/2026): para cada plano que o Radar mostrar, inclua uma linha pronta para copiar no app, sempre como **ordem bracket** (compra, stop e alvo enviados juntos, para nunca existir posição sem stop): `BRACKET <TICKER>: comprar <N> a <entrada> (limite) · stop <stop> · alvo <alvo> · validade: dia`. Os números são os do `size.py` e do `check.py`. Se o `check.py` deu BLOCK, não mostre o bilhete.
+
 **Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.
