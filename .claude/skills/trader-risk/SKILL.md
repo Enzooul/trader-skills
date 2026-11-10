@@ -79,6 +79,8 @@ batch that is fine order by order but breaks a limit together is caught.
 | pdt | (entries, only with `pdt_guard` true) 3 day trades already in the last 5 business days |
 | duplicate | (entries) the same symbol and side twice in one batch, or already placed today |
 | daily limit | (entries) `max_orders_per_day` orders already placed today |
+| circuit breaker | (entries) `max_consecutive_losses` (2) losing exits in a row today, counted from the IBKR fills in `account.json` (one sell order = one exit): no new entries until tomorrow |
+| cooldown | (entries) the same symbol closed at a loss less than `loss_cooldown_min` (60) minutes ago |
 
 How the numbers work:
 

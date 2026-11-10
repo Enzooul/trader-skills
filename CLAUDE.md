@@ -50,6 +50,8 @@ A conta real do usuário é na Interactive Brokers (IBKR) e **toda a operação 
 
 **Alertas de rompimento** (aprovado pelo Cristian em 10/11/2026): a rotina "Alertas de rompimento" (9:46 NY) pode criar **alertas de preço** na IBKR (`create_alert`, `LAST` `GTE` na máxima da faixa de abertura, `tif` `UNTIL_DATE` = hoje, até 8 por dia). É a única exceção à regra abaixo: nunca ordens, nunca apagar ou mudar alertas que não criou. O alerta é só um aviso; qualquer ordem segue o caminho normal (Radar ou thread de ordem, `trader-risk` e o "sim").
 
+**Disjuntores** (aprovado pelo Cristian em 10/11/2026): o `check.py` bloqueia entradas novas depois de `max_consecutive_losses` (2) saídas com perda seguidas no dia e bloqueia o mesmo ativo por `loss_cooldown_min` (60) minutos depois de uma saída com perda. Conta pelas execuções da IBKR no `account.json`. Se o Radar mostrar `CIRCUIT BREAKER`, essa é a primeira linha da mensagem e nenhum plano novo sai até o dia seguinte.
+
 **Ordens:** `create_order_instruction` e qualquer ferramenta que mude a conta (`delete_order_instruction`, alertas, watchlists e screeners salvos) só com pedido explícito do usuário, depois do `trader-risk` e do "sim" para aquela ordem específica. A conta é **real** (`"paper": false` em `trader/config.json`).
 
 Rotinas: o conector só aparece numa sessão nova e precisa estar na lista de conectores de cada rotina.

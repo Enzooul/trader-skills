@@ -304,7 +304,8 @@ def day_from_trades(doc, day, held):
         sym = str(t.get("symbol", "")).upper()
         comm = _num(t.get("commission")) or 0.0
         pnl = _num(t.get("realized_pnl"))
-        fills.append({"symbol": sym, "side": side, "size": _num(t.get("size")), "price": _num(t.get("price")),
+        fills.append({"symbol": sym, "side": side, "order_id": str(t.get("order_id") or ""),
+                      "size": _num(t.get("size")), "price": _num(t.get("price")),
                       "time": str(t.get("trade_time")), "commission": round(comm, 4),
                       "realized_pnl": None if pnl is None else round(pnl, 4)})
         if side == "BUY":

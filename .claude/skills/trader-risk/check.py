@@ -37,6 +37,10 @@ What blocks an entry (on top):
   duplicate     the same symbol and side twice in this batch, or already
                 placed today (trader/state/broker.json)
   daily limit   max_orders_per_day orders placed today
+  circuit breaker  "max_consecutive_losses" (2) losing exits in a row today
+                (IBKR fills): no new entries until tomorrow
+  cooldown      the same symbol closed at a loss less than "loss_cooldown_min"
+                (60) minutes ago
   stop          no stop while "require_stop": true (a bracket stop_loss_stop_price
                 or the order's plan stop); a stop on the wrong side of the entry
   loss          qty x (entry - stop) over max_loss_per_trade_usd. The entry is
@@ -74,7 +78,7 @@ DEFAULTS = {
     "max_orders_per_day": 10, "min_reward_risk": 1.0, "require_stop": True,
     "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55",
     "paper": True, "blocked": [], "allow_options": False, "allow_margin": False, "allow_short": False,
-    "pdt_guard": False,
+    "pdt_guard": False, "max_consecutive_losses": 2, "loss_cooldown_min": 60,
 }
 ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
@@ -445,6 +449,31 @@ def broker_today(day, positions):
     return entries, round(loss + open_risk, 2), unprotected, notes
 
 
+def loss_streak(day):
+    """Circuit breakers from IBKR's fills of today (account.json "today"):
+    returns (losing exits in a row at the end of the day, {SYMBOL: naive UTC time of its last losing exit}).
+    An exit is one sell order (its fills summed); without an order id, symbol + time stands in."""
+    exits = {}
+    for f in (day or {}).get("fills") or []:
+        if str(f.get("side", "")).upper() != "SELL":
+            continue
+        when = parse_utc(f.get("time"))
+        if when is None:
+            continue
+        key = f.get("order_id") or "%s@%s" % (f.get("symbol"), f.get("time"))
+        e = exits.setdefault(key, {"symbol": str(f.get("symbol", "")).upper(), "time": when, "pnl": 0.0})
+        e["time"] = max(e["time"], when)
+        e["pnl"] += _f(f.get("realized_pnl")) or 0.0
+    streak, last_loss = 0, {}
+    for e in sorted(exits.values(), key=lambda x: x["time"]):
+        if e["pnl"] < 0:
+            streak += 1
+            last_loss[e["symbol"]] = e["time"]
+        elif e["pnl"] > 0:
+            streak = 0
+    return streak, last_loss
+
+
 def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=None, price_times=None,
           broker_day=None):
     """Pure function. Returns {"results": [...], "pass": n, "block": n, "warnings": [...]}.
@@ -486,6 +515,12 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
         elif unprotected:
             top_warn.append("NO STOP AT THE BROKER for %s: attach the stop in the IBKR app first"
                             % ", ".join(unprotected))
+    streak, last_loss = loss_streak(broker_day) if broker_day is not None else (0, {})
+    max_streak = int(c.get("max_consecutive_losses") or 0)
+    cooldown = int(c.get("loss_cooldown_min") or 0)
+    if max_streak and streak >= max_streak:
+        top_warn.append("CIRCUIT BREAKER: %d losing exits in a row today (limit %d): no new entries until "
+                        "tomorrow" % (streak, max_streak))
     placed_keys = {(str(r.get("symbol", "")).upper(), r.get("side")) for r in done_today}
     win_reasons, win_warns = window_check(now_et, c)
     pdt_n, pdt_list = day_trades(state, today) if c.get("pdt_guard") else (0, [])
@@ -715,6 +750,15 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             if cap_t and n_entries + batch_entries >= cap_t:
                 later.append("trades: %d entries placed today plus %d passed earlier in this batch, your limit "
                              "is %d a day" % (n_entries, batch_entries, cap_t))
+            if max_streak and streak >= max_streak:
+                later.append("circuit breaker: %d losing exits in a row today, your limit is %d "
+                             "(\"max_consecutive_losses\"); no new entries until tomorrow" % (streak, max_streak))
+            if cooldown and sym in last_loss:
+                until = last_loss[sym] + datetime.timedelta(minutes=cooldown)
+                if now_utc < until:
+                    later.append("cooldown: %s closed at a loss at %s ET; no new entry in it until %s ET "
+                                 "(\"loss_cooldown_min\": %d)" % (sym, to_eastern(last_loss[sym]).strftime("%H:%M"),
+                                                                 to_eastern(until).strftime("%H:%M"), cooldown))
             if unprotected:
                 later.append("unprotected: %s open without a working stop at the broker; no new entry until "
                              "it has one" % ", ".join(unprotected))
